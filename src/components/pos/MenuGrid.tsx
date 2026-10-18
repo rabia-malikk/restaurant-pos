@@ -23,9 +23,15 @@ export default function MenuGrid() {
     );
   }
 
-  const categories = [...data.categories].sort((a, b) => a.sort_order - b.sort_order);
-  const activeCategory = selected ?? categories[0]?.id ?? false;
-  const items = data.items.filter((item) => item.category_id === activeCategory);
+  const categories = data.categories
+    .filter((category) => category.is_active)
+    .sort((a, b) => a.sort_order - b.sort_order);
+  const activeCategory = categories.some((category) => category.id === selected)
+    ? selected
+    : categories[0]?.id ?? false;
+  const items = data.items.filter(
+    (item) => item.category_id === activeCategory && categories.some((category) => category.id === item.category_id),
+  );
 
   return (
     <Box>

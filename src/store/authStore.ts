@@ -7,7 +7,7 @@ interface AuthState {
   /** 'loading' until the first /auth/me check finishes. */
   status: 'loading' | 'authed' | 'anon';
   bootstrap: () => Promise<void>;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, replaceSession?: boolean) => Promise<void>;
   logout: () => Promise<void>;
   /** Clears local state only (used when the server says the session is gone). */
   clear: () => void;
@@ -26,8 +26,8 @@ export const useAuthStore = create<AuthState>()((set) => ({
     }
   },
 
-  login: async (username, password) => {
-    const user = await authApi.login(username, password);
+  login: async (username, password, replaceSession) => {
+    const user = await authApi.login(username, password, replaceSession);
     set({ user, status: 'authed' });
   },
 

@@ -14,10 +14,32 @@ export interface User {
   is_active: boolean;
 }
 
+export interface UserCapacity {
+  active_users: number;
+  max_users: number;
+  active_admins: number;
+  max_admins: number;
+  active_staff: number;
+  max_staff: number;
+}
+
+export interface CreateUserPayload {
+  name: string;
+  username: string;
+  password: string;
+  role: Role;
+  is_active: boolean;
+}
+
+export interface UpdateUserPayload extends Partial<Omit<CreateUserPayload, 'password'>> {
+  password?: string;
+}
+
 export interface Category {
   id: number;
   name: string;
   sort_order: number;
+  is_active: boolean;
 }
 
 export interface MenuItem {

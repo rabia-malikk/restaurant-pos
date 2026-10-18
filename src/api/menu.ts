@@ -1,7 +1,5 @@
-import { USE_MOCK } from '@/config';
-import type { CreateMenuItemPayload, MenuItem, MenuResponse, UpdateMenuItemPayload } from '@/types';
+import type { Category, CreateMenuItemPayload, MenuItem, MenuResponse, UpdateMenuItemPayload } from '@/types';
 import { http } from './client';
-import { mock } from './mockDb';
 
 function asFormData(payload: CreateMenuItemPayload | UpdateMenuItemPayload) {
   const form = new FormData();
@@ -14,10 +12,21 @@ function asFormData(payload: CreateMenuItemPayload | UpdateMenuItemPayload) {
 
 export const menuApi = {
   get: (): Promise<MenuResponse> =>
-    USE_MOCK ? mock.getMenu() : http.get<MenuResponse>('/menu').then((r) => r.data),
+    http.get<MenuResponse>('/menu').then((r) => r.data),
+
+  createCategory: (name: string): Promise<Category> =>
+    http.post<Category>('/menu/categories', { name }).then((r) => r.data),
+
+  updateCategory: (id: number, name: string): Promise<Category> =>
+    http.patch<Category>(`/menu/categories/${id}`, { name }).then((r) => r.data),
+
+  setCategoryActive: (id: number, isActive: boolean): Promise<Category> =>
+    http.patch<Category>(`/menu/categories/${id}`, { is_active: isActive }).then((r) => r.data),
+
+  removeCategory: (id: number): Promise<void> =>
+    http.delete(`/menu/categories/${id}`).then(() => undefined),
 
   create: (item: CreateMenuItemPayload): Promise<MenuItem> => {
-    if (USE_MOCK) return mock.createMenuItem(item);
     if (item.image) {
       return http
         .post<MenuItem>('/menu/items', asFormData(item), { headers: { 'Content-Type': 'multipart/form-data' } })
@@ -28,7 +37,6 @@ export const menuApi = {
   },
 
   update: (id: number, item: UpdateMenuItemPayload): Promise<MenuItem> => {
-    if (USE_MOCK) return mock.updateMenuItem(id, item);
     if (item.image) {
       return http
         .patch<MenuItem>(`/menu/items/${id}`, asFormData(item), { headers: { 'Content-Type': 'multipart/form-data' } })
@@ -39,7 +47,8 @@ export const menuApi = {
   },
 
   setAvailability: (id: number, isAvailable: boolean): Promise<MenuItem> =>
-    USE_MOCK
-      ? mock.setAvailability(id, isAvailable)
-      : http.patch<MenuItem>(`/menu/items/${id}`, { is_available: isAvailable }).then((r) => r.data),
+    http.patch<MenuItem>(`/menu/items/${id}`, { is_available: isAvailable }).then((r) => r.data),
+
+  remove: (id: number): Promise<void> =>
+    http.delete(`/menu/items/${id}`).then(() => undefined),
 };

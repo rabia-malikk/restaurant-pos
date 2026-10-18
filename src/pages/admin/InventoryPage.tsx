@@ -42,7 +42,13 @@ export default function InventoryPage() {
       inventory.data.production_plan.map((entry) => [entry.menu_item_id, String(entry.quantity)]),
     );
     setProductionPlan(
-      Object.fromEntries(menu.data.items.map((item) => [item.id, savedPlan[item.id] ?? '0'])),
+      Object.fromEntries(
+        menu.data.items
+          .filter((item) => menu.data.categories.some(
+            (category) => category.id === item.category_id && category.is_active,
+          ))
+          .map((item) => [item.id, savedPlan[item.id] ?? '0']),
+      ),
     );
     initialized.current = true;
   }, [inventory.data, menu.data]);
@@ -98,7 +104,9 @@ export default function InventoryPage() {
   const handleSavePlan = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     savePlan.mutate(
-      menu.data.items.map((item) => ({
+      menu.data.items.filter((item) => menu.data.categories.some(
+        (category) => category.id === item.category_id && category.is_active,
+      )).map((item) => ({
         menu_item_id: item.id,
         quantity: Number(productionPlan[item.id] ?? 0),
       })),
@@ -220,7 +228,9 @@ export default function InventoryPage() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {menu.data.items.map((item) => (
+              {menu.data.items.filter((item) => menu.data.categories.some(
+                (category) => category.id === item.category_id && category.is_active,
+              )).map((item) => (
                 <TableRow key={item.id}>
                   <TableCell>{item.name}</TableCell>
                   <TableCell align="right">

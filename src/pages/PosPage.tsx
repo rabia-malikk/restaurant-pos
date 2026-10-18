@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Box, Divider, Typography } from '@mui/material';
+import { Alert, Box, Divider, Typography } from '@mui/material';
 import { ordersApi } from '@/api/orders';
 import { useMenu } from '@/hooks/useMenu';
 import { useOpenOrders } from '@/hooks/useOrders';
@@ -35,10 +35,12 @@ export default function PosPage() {
   const details = usePosStore((s) => s.details);
   const cart = usePosStore((s) => s.cart);
   const setOrder = usePosStore((s) => s.setOrder);
+  const updateOrder = usePosStore((s) => s.updateOrder);
   const setDetails = usePosStore((s) => s.setDetails);
   const reset = usePosStore((s) => s.reset);
 
-  const { data: menu } = useMenu();
+  const menuQuery = useMenu();
+  const { data: menu } = menuQuery;
   const { data: openOrders = [], isLoading } = useOpenOrders();
 
   const [payOpen, setPayOpen] = useState(false);
@@ -121,11 +123,26 @@ export default function PosPage() {
     onError: (error) => notify(errorMessage(error), 'error'),
   });
 
+  const removeSavedItemMutation = useMutation({
+    mutationFn: (itemId: number) => ordersApi.removeItem(order!.id, itemId),
+    onSuccess: (updated) => {
+      if (usePosStore.getState().order?.id === updated.id) updateOrder(updated);
+      refreshOrders();
+      notify('Saved item removed from the order.', 'success');
+    },
+    onError: (error) => notify(errorMessage(error), 'error'),
+  });
+
   // ---- Derived -----------------------------------------------------------
 
   const menuItems = menu?.items ?? [];
   const totals = computeTotals(order, cartSubtotal(cart, menuItems));
-  const busy = openMutation.isPending || createMutation.isPending || saveMutation.isPending || cancelMutation.isPending;
+  const busy =
+    openMutation.isPending ||
+    createMutation.isPending ||
+    saveMutation.isPending ||
+    cancelMutation.isPending ||
+    removeSavedItemMutation.isPending;
 
   // ---- Handlers ----------------------------------------------------------
 
@@ -167,6 +184,11 @@ export default function PosPage() {
   const handleCancel = (id: number) => {
     if (!window.confirm('Cancel this order? This cannot be undone.')) return;
     cancelMutation.mutate(id);
+  };
+
+  const handleRemoveSavedItem = (itemId: number, itemName: string) => {
+    if (!window.confirm(`Remove ${itemName} from this saved order? Its line will remain in order history.`)) return;
+    removeSavedItemMutation.mutate(itemId);
   };
 
   // ---- Effects -----------------------------------------------------------
@@ -244,7 +266,11 @@ export default function PosPage() {
             </Box>
             <CustomerFields />
             <Divider />
-            <MenuGrid />
+            {menuQuery.isError ? (
+              <Alert severity="error">{errorMessage(menuQuery.error)}</Alert>
+            ) : (
+              <MenuGrid />
+            )}
           </Box>
         ) : (
           <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 4, textAlign: 'center' }}>
@@ -262,10 +288,12 @@ export default function PosPage() {
 
       <Box sx={{ ...panelSx, overflow: 'hidden', maxHeight: { xs: 560, md: 'none' } }}>
         <OrderSummary
-          saving={saveMutation.isPending || cancelMutation.isPending}
+          saving={saveMutation.isPending || cancelMutation.isPending || removeSavedItemMutation.isPending}
           onSave={handleSave}
           onCheckout={handleCheckout}
           onCancel={() => handleCancel(order!.id)}
+          onRemoveSavedItem={handleRemoveSavedItem}
+          removingSavedItem={removeSavedItemMutation.isPending}
         />
       </Box>
 

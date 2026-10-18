@@ -1,8 +1,13 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import AddIcon from '@mui/icons-material/Add';
 import EditIcon from '@mui/icons-material/Edit';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import CategoryIcon from '@mui/icons-material/Category';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import RemoveIcon from '@mui/icons-material/Remove';
 import {
+  Alert,
   Box,
   Button,
   CircularProgress,
@@ -27,7 +32,7 @@ import {
   Typography,
 } from '@mui/material';
 import { menuApi } from '@/api/menu';
-import type { MenuItem } from '@/types';
+import type { Category, MenuItem } from '@/types';
 import { useNotify } from '@/context/NotifyContext';
 import { useMenu } from '@/hooks/useMenu';
 import { errorMessage } from '@/lib/errors';
@@ -36,10 +41,17 @@ import { formatMoney } from '@/lib/format';
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 
 export default function MenuPage() {
-  const { data, isLoading } = useMenu();
+  const { data, isLoading, isError, error } = useMenu();
   const notify = useNotify();
   const queryClient = useQueryClient();
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
+  const [deletingItem, setDeletingItem] = useState<MenuItem | null>(null);
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [archivingCategory, setArchivingCategory] = useState<Category | null>(null);
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [categoryNameValue, setCategoryNameValue] = useState('');
+  const [categoriesExpanded, setCategoriesExpanded] = useState(true);
+  const categorySectionRef = useRef<HTMLDivElement>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [categoryId, setCategoryId] = useState<number | ''>('');
   const [name, setName] = useState('');
@@ -55,6 +67,17 @@ export default function MenuPage() {
     setImagePreview(objectUrl);
     return () => URL.revokeObjectURL(objectUrl);
   }, [imageFile]);
+
+  useEffect(() => {
+    if (!categoriesExpanded) return undefined;
+    const collapseOnOutsideClick = (event: PointerEvent) => {
+      if (!categorySectionRef.current?.contains(event.target as Node)) {
+        setCategoriesExpanded(false);
+      }
+    };
+    document.addEventListener('pointerdown', collapseOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', collapseOnOutsideClick);
+  }, [categoriesExpanded]);
 
   const toggle = useMutation({
     mutationFn: ({ id, available }: { id: number; available: boolean }) => menuApi.setAvailability(id, available),
@@ -78,6 +101,53 @@ export default function MenuPage() {
       queryClient.invalidateQueries({ queryKey: ['menu'] });
       notify(variables.id === undefined ? 'Menu item added.' : 'Menu item updated.', 'success');
       closeDialog();
+    },
+    onError: (error) => notify(errorMessage(error), 'error'),
+  });
+
+  const deleteItem = useMutation({
+    mutationFn: (item: MenuItem) => menuApi.remove(item.id),
+    onSuccess: (_result, item) => {
+      queryClient.invalidateQueries({ queryKey: ['menu'] });
+      queryClient.invalidateQueries({ queryKey: ['inventory'] });
+      setDeletingItem(null);
+      notify(`${item.name} removed from the active menu.`, 'success');
+    },
+    onError: (error) => notify(errorMessage(error), 'error'),
+  });
+
+  const saveCategory = useMutation({
+    mutationFn: () =>
+      editingCategory
+        ? menuApi.updateCategory(editingCategory.id, categoryNameValue)
+        : menuApi.createCategory(categoryNameValue),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['menu'] });
+      setCategoryDialogOpen(false);
+      setEditingCategory(null);
+      setCategoryNameValue('');
+      notify(editingCategory ? 'Category updated.' : 'Category added.', 'success');
+    },
+    onError: (error) => notify(errorMessage(error), 'error'),
+  });
+
+  const toggleCategory = useMutation({
+    mutationFn: ({ category, isActive }: { category: Category; isActive: boolean }) =>
+      menuApi.setCategoryActive(category.id, isActive),
+    onSuccess: (_updated, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['menu'] });
+      notify(variables.isActive ? 'Category enabled.' : 'Category disabled; its items are unavailable.', 'success');
+    },
+    onError: (error) => notify(errorMessage(error), 'error'),
+  });
+
+  const deleteCategory = useMutation({
+    mutationFn: (category: Category) => menuApi.removeCategory(category.id),
+    onSuccess: (_result, category) => {
+      queryClient.invalidateQueries({ queryKey: ['menu'] });
+      queryClient.invalidateQueries({ queryKey: ['inventory'] });
+      setArchivingCategory(null);
+      notify(`${category.name} archived. Its items are unavailable until the category is restored.`, 'success');
     },
     onError: (error) => notify(errorMessage(error), 'error'),
   });
@@ -115,6 +185,18 @@ export default function MenuPage() {
     setDialogOpen(true);
   };
 
+  const openAddCategory = () => {
+    setEditingCategory(null);
+    setCategoryNameValue('');
+    setCategoryDialogOpen(true);
+  };
+
+  const openEditCategory = (category: Category) => {
+    setEditingCategory(category);
+    setCategoryNameValue(category.name);
+    setCategoryDialogOpen(true);
+  };
+
   const selectImage = (file: File) => {
     if (!file.type.startsWith('image/')) {
       notify('Choose an image file.', 'error');
@@ -127,7 +209,7 @@ export default function MenuPage() {
     setImageFile(file);
   };
 
-  if (isLoading || !data) {
+  if (isLoading) {
     return (
       <Box sx={{ p: 3 }}>
         <CircularProgress aria-label="Loading menu" />
@@ -135,7 +217,19 @@ export default function MenuPage() {
     );
   }
 
-  const categoryName = (id: number) => data.categories.find((category) => category.id === id)?.name ?? '';
+  if (isError || !data) {
+    return (
+      <Box sx={{ p: 3 }}>
+        <Alert severity="error">
+          {error ? errorMessage(error) : 'Could not load menu items from the database.'}
+        </Alert>
+      </Box>
+    );
+  }
+
+  const categoryForItem = (id: number) => data.categories.find((category) => category.id === id);
+  const categoryName = (id: number) => categoryForItem(id)?.name ?? '';
+  const activeCategoryCount = data.categories.filter((category) => category.is_active).length;
 
   const handleSaveItem = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -154,15 +248,86 @@ export default function MenuPage() {
   };
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100, mx: 'auto' }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Typography variant="h5">Menu</Typography>
-        <Button
-          variant="contained"
-          startIcon={<AddIcon />}
-          onClick={openAddDialog}
-          disabled={data.categories.length === 0}
-        >
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100, mx: 'auto', display: 'grid', gap: 3 }}>
+      <Typography variant="h5">Menu &amp; categories</Typography>
+      <Paper ref={categorySectionRef} variant="outlined">
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, p: 2 }}>
+          <Box>
+            <Typography variant="h6">Categories</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Disabled or archived categories and their items are hidden from the POS.
+            </Typography>
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Button variant="contained" startIcon={<CategoryIcon />} onClick={openAddCategory}>
+              Add category
+            </Button>
+            <IconButton
+              aria-label={categoriesExpanded ? 'Minimize categories' : 'Expand categories'}
+              title={categoriesExpanded ? 'Minimize categories' : 'Expand categories'}
+              onClick={() => setCategoriesExpanded((expanded) => !expanded)}
+            >
+              {categoriesExpanded ? <RemoveIcon /> : <ExpandMoreIcon />}
+            </IconButton>
+          </Box>
+        </Box>
+        {categoriesExpanded && <TableContainer>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Category</TableCell>
+                <TableCell align="right">Items</TableCell>
+                <TableCell align="center">Enabled</TableCell>
+                <TableCell align="center">Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {data.categories.map((category) => (
+                <TableRow key={category.id} hover sx={{ opacity: category.is_active ? 1 : 0.65 }}>
+                  <TableCell>{category.name}</TableCell>
+                  <TableCell align="right">
+                    {data.items.filter((item) => item.category_id === category.id).length}
+                  </TableCell>
+                  <TableCell align="center">
+                    <Switch
+                      checked={category.is_active}
+                      onChange={(_, checked) => toggleCategory.mutate({ category, isActive: checked })}
+                      disabled={toggleCategory.isPending}
+                      inputProps={{ 'aria-label': `Enable ${category.name} category` }}
+                    />
+                  </TableCell>
+                  <TableCell align="center">
+                    <IconButton aria-label={`Edit ${category.name}`} onClick={() => openEditCategory(category)}>
+                      <EditIcon />
+                    </IconButton>
+                    {category.is_active && (
+                      <IconButton
+                        aria-label={`Delete ${category.name} category`}
+                        color="error"
+                        onClick={() => setArchivingCategory(category)}
+                        disabled={deleteCategory.isPending}
+                      >
+                        <DeleteOutlineIcon />
+                      </IconButton>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {data.categories.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={4}>
+                    <Typography color="text.secondary">No categories yet. Add one to start building the menu.</Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>}
+      </Paper>
+
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
+        <Typography variant="h6">Menu items</Typography>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={openAddDialog} disabled={activeCategoryCount === 0}>
           Add item
         </Button>
       </Box>
@@ -176,7 +341,7 @@ export default function MenuPage() {
               <TableCell align="right">Price</TableCell>
               <TableCell align="right">Prep time</TableCell>
               <TableCell align="center">Available</TableCell>
-              <TableCell align="center">Edit</TableCell>
+              <TableCell align="center">Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -195,19 +360,38 @@ export default function MenuPage() {
                   )}
                 </TableCell>
                 <TableCell>{item.name}</TableCell>
-                <TableCell>{categoryName(item.category_id)}</TableCell>
+                <TableCell>
+                  {categoryName(item.category_id)}
+                  {!categoryForItem(item.category_id)?.is_active && (
+                    <Typography component="span" variant="caption" color="error.main"> (disabled)</Typography>
+                  )}
+                </TableCell>
                 <TableCell align="right">{formatMoney(item.price)}</TableCell>
                 <TableCell align="right">{item.prep_time_minutes} min</TableCell>
                 <TableCell align="center">
                   <Switch
                     checked={item.is_available}
                     onChange={(_, checked) => toggle.mutate({ id: item.id, available: checked })}
-                    inputProps={{ 'aria-label': `${item.name} available` }}
+                    disabled={!categoryForItem(item.category_id)?.is_active || toggle.isPending}
+                    inputProps={{
+                      'aria-label': `${item.name} available`,
+                      title: categoryForItem(item.category_id)?.is_active
+                        ? undefined
+                        : 'Enable this item by enabling its category or moving it to an active category.',
+                    }}
                   />
                 </TableCell>
                 <TableCell align="center">
                   <IconButton aria-label={`Edit ${item.name}`} onClick={() => openEditDialog(item)}>
                     <EditIcon />
+                  </IconButton>
+                  <IconButton
+                    aria-label={`Delete ${item.name}`}
+                    color="error"
+                    onClick={() => setDeletingItem(item)}
+                    disabled={deleteItem.isPending}
+                  >
+                    <DeleteOutlineIcon />
                   </IconButton>
                 </TableCell>
               </TableRow>
@@ -215,6 +399,83 @@ export default function MenuPage() {
           </TableBody>
         </Table>
       </TableContainer>
+      <Dialog open={deletingItem !== null} onClose={deleteItem.isPending ? undefined : () => setDeletingItem(null)}>
+        <DialogTitle>Remove menu item?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {deletingItem?.name} will be removed from the active menu. Existing order history will be retained.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setDeletingItem(null)} disabled={deleteItem.isPending}>
+            Keep item
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => deletingItem && deleteItem.mutate(deletingItem)}
+            disabled={deleteItem.isPending}
+          >
+            {deleteItem.isPending ? 'Removing…' : 'Remove item'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={categoryDialogOpen}
+        onClose={saveCategory.isPending ? undefined : () => setCategoryDialogOpen(false)}
+        fullWidth
+        maxWidth="xs"
+      >
+        <Box
+          component="form"
+          onSubmit={(event: FormEvent<HTMLFormElement>) => {
+            event.preventDefault();
+            saveCategory.mutate();
+          }}
+        >
+          <DialogTitle>{editingCategory ? 'Edit category' : 'Add category'}</DialogTitle>
+          <DialogContent sx={{ pt: '8px !important' }}>
+            <TextField
+              label="Category name"
+              value={categoryNameValue}
+              onChange={(event) => setCategoryNameValue(event.target.value)}
+              required
+              fullWidth
+              autoFocus
+              inputProps={{ maxLength: 100 }}
+            />
+          </DialogContent>
+          <DialogActions sx={{ p: 2 }}>
+            <Button onClick={() => setCategoryDialogOpen(false)} disabled={saveCategory.isPending}>Cancel</Button>
+            <Button type="submit" variant="contained" disabled={saveCategory.isPending}>
+              {saveCategory.isPending ? 'Saving…' : editingCategory ? 'Save changes' : 'Add category'}
+            </Button>
+          </DialogActions>
+        </Box>
+      </Dialog>
+      <Dialog
+        open={archivingCategory !== null}
+        onClose={deleteCategory.isPending ? undefined : () => setArchivingCategory(null)}
+      >
+        <DialogTitle>Delete category?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {archivingCategory?.name} and its items will be removed from the active menu. Existing item and order
+            history will be retained, and you can restore the category later.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setArchivingCategory(null)} disabled={deleteCategory.isPending}>Keep category</Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => archivingCategory && deleteCategory.mutate(archivingCategory)}
+            disabled={deleteCategory.isPending}
+          >
+            {deleteCategory.isPending ? 'Deleting…' : 'Delete category'}
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog open={dialogOpen} onClose={saveItem.isPending ? undefined : closeDialog} fullWidth maxWidth="sm">
         <Box component="form" onSubmit={handleSaveItem}>
           <DialogTitle>{editingItem ? 'Edit menu item' : 'Add menu item'}</DialogTitle>
@@ -275,8 +536,8 @@ export default function MenuPage() {
                 onChange={(event) => setCategoryId(Number(event.target.value))}
               >
                 {data.categories.map((category) => (
-                  <SelectItem key={category.id} value={category.id}>
-                    {category.name}
+                  <SelectItem key={category.id} value={category.id} disabled={!category.is_active}>
+                    {category.is_active ? category.name : `${category.name} (disabled)`}
                   </SelectItem>
                 ))}
               </Select>
@@ -309,7 +570,15 @@ export default function MenuPage() {
             <Button onClick={closeDialog} disabled={saveItem.isPending}>
               Cancel
             </Button>
-            <Button type="submit" variant="contained" disabled={saveItem.isPending || categoryId === ''}>
+            <Button
+              type="submit"
+              variant="contained"
+              disabled={
+                saveItem.isPending ||
+                categoryId === '' ||
+                !data.categories.find((category) => category.id === categoryId)?.is_active
+              }
+            >
               {saveItem.isPending ? 'Saving…' : editingItem ? 'Save changes' : 'Add item'}
             </Button>
           </DialogActions>

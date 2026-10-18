@@ -156,6 +156,11 @@ export default function ReceiptDialog({ receipt, onClose }: Props) {
                   <Typography variant="caption" display="block" textAlign="center" color="text.secondary" sx={{ mt: 2 }}>
                     Thank you for dining with us!
                   </Typography>
+                  <Typography variant="caption" display="block" textAlign="center" color="text.secondary" sx={{ mt: 1 }}>
+                    © {new Date().getFullYear()} HAWT POS. All rights reserved.
+                    <br />
+                    To get yours, reach out to us at +923185231232
+                  </Typography>
                 </Box>
               </Box>
             </DialogContent>

@@ -36,7 +36,7 @@ export default function App() {
             <Route path="/admin/menu" element={<MenuPage />} />
             <Route path="/admin/inventory" element={<InventoryPage />} />
             <Route path="/admin/kitchen" element={<KitchenPage />} />
-            {/* <Route path="/admin/users" element={<UsersPage />} /> */}
+            <Route path="/admin/users" element={<UsersPage />} />
           </Route>
         </Route>
       </Route>

@@ -1,4 +1,5 @@
-import { Box, Button, Chip, Divider, IconButton, Typography } from '@mui/material';
+import { Box, Button, Chip, Divider, IconButton, Tooltip, Typography } from '@mui/material';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
 import { useMenu } from '@/hooks/useMenu';
 import { usePosStore } from '@/store/posStore';
@@ -10,10 +11,19 @@ interface Props {
   onSave: () => void;
   onCheckout: () => void;
   onCancel: () => void;
+  onRemoveSavedItem: (itemId: number, itemName: string) => void;
+  removingSavedItem: boolean;
 }
 
 /** Right panel: saved rounds, the unsaved cart, totals, and the Save / Checkout actions. */
-export default function OrderSummary({ saving, onSave, onCheckout, onCancel }: Props) {
+export default function OrderSummary({
+  saving,
+  onSave,
+  onCheckout,
+  onCancel,
+  onRemoveSavedItem,
+  removingSavedItem,
+}: Props) {
   const order = usePosStore((s) => s.order);
   const cart = usePosStore((s) => s.cart);
   const removeItem = usePosStore((s) => s.removeItem);
@@ -31,6 +41,7 @@ export default function OrderSummary({ saving, onSave, onCheckout, onCancel }: P
   }
 
   const menuItems = menu?.items ?? [];
+  const roundsWithItems = order.rounds.filter((round) => round.items.length > 0);
   const cartLines = menuItems.filter((m) => (cart[m.id] ?? 0) > 0);
   const hasCart = cartLines.length > 0;
   const totals = computeTotals(order, cartSubtotal(cart, menuItems));
@@ -50,11 +61,11 @@ export default function OrderSummary({ saving, onSave, onCheckout, onCancel }: P
       <Divider />
 
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {order.rounds.length === 0 && !hasCart && (
+        {roundsWithItems.length === 0 && !hasCart && (
           <Typography color="text.secondary">No items yet. Add items from the menu.</Typography>
         )}
 
-        {order.rounds.map((round) => (
+        {roundsWithItems.map((round) => (
           <Box key={round.id}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
               <Typography fontWeight={700}>Round {round.round_no}</Typography>
@@ -63,11 +74,28 @@ export default function OrderSummary({ saving, onSave, onCheckout, onCancel }: P
               </Typography>
             </Box>
             {round.items.map((item) => (
-              <Box key={item.id} sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, py: 0.25 }}>
+              <Box key={item.id} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, py: 0.25 }}>
                 <Typography variant="body2">
                   {item.quantity} × {item.item_name}
                 </Typography>
-                <Typography variant="body2">{formatMoney(item.line_total)}</Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Typography variant="body2">{formatMoney(item.line_total)}</Typography>
+                  {round.status !== 'served' && (
+                    <Tooltip title={`Remove ${item.item_name} from this saved order`}>
+                      <span>
+                        <IconButton
+                          size="small"
+                          color="error"
+                          aria-label={`Remove saved ${item.item_name}`}
+                          onClick={() => onRemoveSavedItem(item.id, item.item_name)}
+                          disabled={removingSavedItem || saving}
+                        >
+                          <DeleteOutlineIcon fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  )}
+                </Box>
               </Box>
             ))}
           </Box>
@@ -113,7 +141,8 @@ export default function OrderSummary({ saving, onSave, onCheckout, onCancel }: P
             color="secondary"
             size="large"
             onClick={onCheckout}
-            disabled={saving || hasCart || order.rounds.length === 0}
+            disabled={saving || hasCart || order.subtotal <= 0}
+            sx={{ color: '#FFFFFF' }}
           >
             Checkout
           </Button>

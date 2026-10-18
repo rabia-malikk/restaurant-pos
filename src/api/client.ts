@@ -20,15 +20,17 @@ http.interceptors.response.use(
   (error: unknown) => {
     let status = 0;
     let message = 'Cannot reach the server. Check the connection.';
+    let code: string | undefined;
 
     if (axios.isAxiosError(error)) {
       status = error.response?.status ?? 0;
-      const data = error.response?.data as { message?: string } | undefined;
+      const data = error.response?.data as { code?: string; message?: string } | undefined;
+      code = data?.code;
       if (data?.message) message = data.message;
       else if (status) message = error.message;
     }
 
     if (status === 401) onUnauthorized();
-    return Promise.reject(new ApiError(status, message));
+    return Promise.reject(new ApiError(status, message, code));
   },
 );

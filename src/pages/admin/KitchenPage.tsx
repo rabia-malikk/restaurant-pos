@@ -21,7 +21,7 @@ import type { Order, OrderRound } from '@/types';
 type KitchenView = 'items' | 'orders';
 
 const preparingRounds = (order: Order) =>
-  order.rounds.filter((round) => round.status === 'preparing');
+  order.rounds.filter((round) => round.status === 'preparing' && round.items.length > 0);
 
 const activeKitchenOrders = (orders: Order[]) =>
   orders.filter((order) => order.status !== 'cancelled' && preparingRounds(order).length > 0);

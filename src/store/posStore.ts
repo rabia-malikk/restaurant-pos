@@ -29,6 +29,7 @@ interface PosState {
   cart: Cart;
 
   setOrder: (order: Order) => void;
+  updateOrder: (order: Order) => void;
   setDetails: (patch: Partial<OrderDetails>) => void;
   addItem: (menuItemId: number) => void;
   removeItem: (menuItemId: number) => void;
@@ -42,6 +43,7 @@ export const usePosStore = create<PosState>()((set) => ({
   cart: {},
 
   setOrder: (order) => set({ order, details: detailsOf(order), cart: {} }),
+  updateOrder: (order) => set({ order }),
 
   setDetails: (patch) => set((s) => ({ details: { ...s.details, ...patch } })),
 

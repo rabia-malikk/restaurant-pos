@@ -100,7 +100,7 @@ export default function DashboardPage() {
           BUILT TO SERVE. MADE TO SIZZLE.
         </Typography>
         <Typography color="text.secondary" sx={{ mt: 1 }}>
-          Restaurant POS • Orders • Payments • Performance
+          HAWT POS • Orders • Payments • Performance
         </Typography>
       </Paper>
 

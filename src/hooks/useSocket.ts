@@ -1,20 +1,21 @@
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { io } from 'socket.io-client';
-import { SOCKET_URL, USE_MOCK } from '@/config';
+import { SOCKET_URL } from '@/config';
+import { useNotify } from '@/context/NotifyContext';
 import { useAuthStore } from '@/store/authStore';
 
 /**
  * Listens for realtime events and refreshes the affected queries.
  * Events: order:locked, order:unlocked, order:updated, menu:updated.
- * Not used in mock mode (there is no server to push events).
  */
 export function useSocket() {
   const queryClient = useQueryClient();
+  const notify = useNotify();
   const user = useAuthStore((s) => s.user);
 
   useEffect(() => {
-    if (USE_MOCK || !user) return;
+    if (!user) return;
 
     const socket = io(SOCKET_URL || window.location.origin, { withCredentials: true });
     const refreshOrders = () => queryClient.invalidateQueries({ queryKey: ['orders'] });
@@ -23,9 +24,14 @@ export function useSocket() {
     socket.on('order:unlocked', refreshOrders);
     socket.on('order:updated', refreshOrders);
     socket.on('menu:updated', () => queryClient.invalidateQueries({ queryKey: ['menu'] }));
+    socket.on('session:revoked', () => {
+      useAuthStore.getState().clear();
+      queryClient.clear();
+      notify('You were signed out because this account signed in on another device.', 'warning');
+    });
 
     return () => {
       socket.disconnect();
     };
-  }, [user, queryClient]);
+  }, [user, queryClient, notify]);
 }

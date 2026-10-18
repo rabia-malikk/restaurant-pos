@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { AppBar, Box, Button, Chip, Toolbar, Typography } from '@mui/material';
 import LogoutIcon from '@mui/icons-material/Logout';
+import PeopleAltIcon from '@mui/icons-material/PeopleAlt';
 import { useAuthStore } from '@/store/authStore';
 import { usePosStore } from '@/store/posStore';
 import { ordersApi } from '@/api/orders';
@@ -62,6 +63,9 @@ export default function AppLayout() {
               <Button component={NavLink} to="/admin/kitchen" sx={navButtonSx}>
                 Kitchen
               </Button>
+              <Button component={NavLink} to="/admin/users" sx={navButtonSx} startIcon={<PeopleAltIcon />}>
+                Users
+              </Button>
             </>
           )}
 
@@ -78,6 +82,14 @@ export default function AppLayout() {
 
       <Box component="main" sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         <Outlet />
+      </Box>
+      <Box
+        component="footer"
+        sx={{ py: 1, px: 2, textAlign: 'center', bgcolor: 'background.paper', borderTop: 1, borderColor: 'divider' }}
+      >
+        <Typography variant="caption" color="text.secondary">
+          © {new Date().getFullYear()} HAWT POS. All rights reserved. · Made with ❤️ by Rabia Malik
+        </Typography>
       </Box>
     </Box>
   );
