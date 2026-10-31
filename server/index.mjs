@@ -9,6 +9,7 @@ import mysql from 'mysql2/promise';
 import { Server as SocketServer } from 'socket.io';
 
 const API_PORT = Number(process.env.API_PORT ?? 3000);
+const API_HOST = process.env.API_HOST ?? '127.0.0.1';
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const USER_FEATURES = new Set(['orders', 'menu', 'kitchen']);
@@ -1974,8 +1975,8 @@ async function start() {
   await rows('SELECT id FROM user_sessions LIMIT 0');
   await rows('SELECT id FROM inventory_purchases LIMIT 0');
   await rows('SELECT menu_item_id FROM production_plan LIMIT 0');
-  server.listen(API_PORT, () => {
-    console.log(`HAWT POS API listening on http://localhost:${API_PORT} (MySQL ${process.env.DB_NAME})`);
+  server.listen(API_PORT, API_HOST, () => {
+    console.log(`HAWT POS API listening on http://${API_HOST}:${API_PORT} (MySQL ${process.env.DB_NAME})`);
   });
 }
 
@@ -1984,3 +1985,29 @@ start().catch(async (error) => {
   await pool.end();
   process.exitCode = 1;
 });
+
+let shutdownStarted = false;
+function shutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  console.log(`Received ${signal}; shutting down HAWT POS API.`);
+
+  const timeout = setTimeout(() => {
+    console.error('API shutdown timed out.');
+    process.exit(1);
+  }, 15_000);
+
+  io.close(async () => {
+    try {
+      await pool.end();
+      clearTimeout(timeout);
+      process.exit(0);
+    } catch (error) {
+      console.error('Could not close the database pool:', error.message);
+      process.exit(1);
+    }
+  });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
