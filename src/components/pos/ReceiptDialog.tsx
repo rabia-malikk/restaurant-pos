@@ -11,13 +11,11 @@ import {
 } from '@mui/material';
 import PrintIcon from '@mui/icons-material/Print';
 import { formatDateTime, formatMoney, ORDER_TYPE_LABEL, PAYMENT_LABEL, orderTitle } from '@/lib/format';
-import type { Order, PaymentMethod } from '@/types';
+import type { Order, ReceiptPayment } from '@/types';
 
 interface Receipt {
   order: Order;
-  method: PaymentMethod;
-  amount: number;
-  reference: string;
+  payments: ReceiptPayment[];
 }
 
 interface Props {
@@ -111,8 +109,13 @@ export default function ReceiptDialog({ receipt, onClose }: Props) {
                       alt=""
                       sx={{ width: 52, height: 52, objectFit: 'contain', mb: 0.5 }}
                     />
+                    <Typography variant="caption" textAlign="center" color="text.secondary">
+                      For Orders: 03231552555
+                      <br />
+                      HAWT., Pakistan Mall, Minar Road, opposite Save Mart, Wah Cantt.
+                    </Typography>
                     <Typography variant="subtitle2" fontWeight={800} textAlign="center">
-                      BUILT TO SERVE. MADE TO SIZZLE.
+                      Normal Is Boring
                     </Typography>
                     <Typography variant="caption" color="text.secondary">CUSTOMER COPY</Typography>
                   </Box>
@@ -132,7 +135,8 @@ export default function ReceiptDialog({ receipt, onClose }: Props) {
                       round.items.map((item) => (
                         <Box key={item.id} sx={{ display: 'contents' }}>
                           <Typography variant="body2">
-                            {item.quantity} × {item.item_name}
+                            {item.quantity} × {item.item_name}{item.is_meal ? ' (Meal)' : ''}
+                            {item.remarks ? ` — ${item.remarks}` : ''}
                           </Typography>
                           <Typography variant="body2" textAlign="right">{formatMoney(item.line_total)}</Typography>
                         </Box>
@@ -142,17 +146,33 @@ export default function ReceiptDialog({ receipt, onClose }: Props) {
 
                   <Divider sx={{ borderStyle: 'dashed', my: 1.5 }} />
                   <ReceiptRow label="Subtotal" value={formatMoney(receipt.order.subtotal)} />
-                  {receipt.order.discount > 0 && (
-                    <ReceiptRow label="Discount" value={`-${formatMoney(receipt.order.discount)}`} />
-                  )}
+                  <ReceiptRow
+                    label={
+                      receipt.order.discount_type === 'percentage'
+                        ? `Discount (${receipt.order.discount_value}%)`
+                        : 'Discount'
+                    }
+                    value={
+                      receipt.order.discount > 0
+                        ? `-${formatMoney(receipt.order.discount)}`
+                        : formatMoney(0)
+                    }
+                  />
                   {receipt.order.tax > 0 && <ReceiptRow label="Tax" value={formatMoney(receipt.order.tax)} />}
                   {receipt.order.delivery_fee > 0 && (
                     <ReceiptRow label="Delivery fee" value={formatMoney(receipt.order.delivery_fee)} />
                   )}
-                  <ReceiptRow label="TOTAL PAID" value={formatMoney(receipt.amount)} strong />
+                  <ReceiptRow label="TOTAL PAID" value={formatMoney(receipt.order.total)} strong />
                   <Divider sx={{ borderStyle: 'dashed', my: 1.5 }} />
-                  <ReceiptRow label="Payment" value={PAYMENT_LABEL[receipt.method]} />
-                  {receipt.reference && <ReceiptRow label="Reference" value={receipt.reference} />}
+                  {receipt.payments.map((payment, index) => (
+                    <Box key={`${payment.method}-${payment.reference ?? ''}-${index}`}>
+                      <ReceiptRow
+                        label={`Payment${receipt.payments.length > 1 ? ` ${index + 1}` : ''} · ${PAYMENT_LABEL[payment.method]}`}
+                        value={formatMoney(payment.amount)}
+                      />
+                      {payment.reference && <ReceiptRow label="Reference" value={payment.reference} />}
+                    </Box>
+                  ))}
                   <Typography variant="caption" display="block" textAlign="center" color="text.secondary" sx={{ mt: 2 }}>
                     Thank you for dining with us!
                   </Typography>

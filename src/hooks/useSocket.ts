@@ -24,6 +24,9 @@ export function useSocket() {
     socket.on('order:unlocked', refreshOrders);
     socket.on('order:updated', refreshOrders);
     socket.on('menu:updated', () => queryClient.invalidateQueries({ queryKey: ['menu'] }));
+    socket.on('permissions:updated', () => {
+      void useAuthStore.getState().bootstrap();
+    });
     socket.on('session:revoked', () => {
       useAuthStore.getState().clear();
       queryClient.clear();

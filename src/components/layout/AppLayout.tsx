@@ -46,7 +46,7 @@ export default function AppLayout() {
           <Button component={NavLink} to="/pos" sx={navButtonSx}>
             POS
           </Button>
-          {user.role === 'admin' && (
+          {user.role === 'admin' ? (
             <>
               <Button component={NavLink} to="/admin" end sx={navButtonSx}>
                 Dashboard
@@ -66,6 +66,24 @@ export default function AppLayout() {
               <Button component={NavLink} to="/admin/users" sx={navButtonSx} startIcon={<PeopleAltIcon />}>
                 Users
               </Button>
+            </>
+          ) : (
+            <>
+              {user.features.includes('orders') && (
+                <Button component={NavLink} to="/admin/orders" sx={navButtonSx}>
+                  Orders
+                </Button>
+              )}
+              {user.features.includes('menu') && (
+                <Button component={NavLink} to="/admin/menu" sx={navButtonSx}>
+                  Menu
+                </Button>
+              )}
+              {user.features.includes('kitchen') && (
+                <Button component={NavLink} to="/admin/kitchen" sx={navButtonSx}>
+                  Kitchen
+                </Button>
+              )}
             </>
           )}
 

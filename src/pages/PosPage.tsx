@@ -12,7 +12,7 @@ import { usePosStore } from '@/store/posStore';
 import { errorMessage } from '@/lib/errors';
 import { orderTitle } from '@/lib/format';
 import { cartLineCount, cartSubtotal, computeTotals, validateDetails } from '@/lib/orderRules';
-import type { OrderRound, PaymentMethod } from '@/types';
+import type { Order, OrderReceipt, OrderRound, PaymentMethod } from '@/types';
 import DraftsPanel from '@/components/pos/DraftsPanel';
 import OrderTypeToggle from '@/components/pos/OrderTypeToggle';
 import CustomerFields from '@/components/pos/CustomerFields';
@@ -21,7 +21,6 @@ import OrderSummary from '@/components/pos/OrderSummary';
 import PaymentDialog from '@/components/pos/PaymentDialog';
 import SavedRoundDialog from '@/components/pos/SavedRoundDialog';
 import ReceiptDialog from '@/components/pos/ReceiptDialog';
-import type { Order } from '@/types';
 
 const panelSx = { minHeight: 0, overflow: 'auto', bgcolor: 'background.paper' } as const;
 
@@ -44,17 +43,10 @@ export default function PosPage() {
   const { data: openOrders = [], isLoading } = useOpenOrders();
 
   const [payOpen, setPayOpen] = useState(false);
-  const [savedRound, setSavedRound] = useState<{ round: OrderRound; orderNo: string } | null>(null);
-  const [receipt, setReceipt] = useState<{
-    order: Order;
-    method: PaymentMethod;
-    amount: number;
-    reference: string;
-  } | null>(null);
+  const [savedRound, setSavedRound] = useState<{ order: Order; round: OrderRound } | null>(null);
+  const [receipt, setReceipt] = useState<OrderReceipt | null>(null);
 
   const refreshOrders = () => queryClient.invalidateQueries({ queryKey: ['orders'] });
-
-  // ---- Mutations ---------------------------------------------------------
 
   const openMutation = useMutation({
     mutationFn: (id: number) => ordersApi.open(id),
@@ -81,12 +73,19 @@ export default function PosPage() {
     mutationFn: () =>
       ordersApi.save(order!.id, {
         ...details,
-        items: Object.entries(cart).map(([id, quantity]) => ({ menu_item_id: Number(id), quantity })),
+        discount_type: order!.discount_type ?? 'amount',
+        discount_value: order!.discount_value ?? order!.discount ?? 0,
+        items: cart.map((line) => ({
+          menu_item_id: line.menu_item_id,
+          quantity: 1,
+          is_meal: line.is_meal,
+          remarks: line.remarks.trim(),
+        })),
       }),
     onSuccess: ({ order: saved, round }) => {
       reset();
       refreshOrders();
-      if (round) setSavedRound({ round, orderNo: saved.order_no });
+      if (round) setSavedRound({ order: saved, round });
       else notify('Order saved', 'success');
     },
     onError: (error) => notify(errorMessage(error), 'error'),
@@ -105,9 +104,13 @@ export default function PosPage() {
       refreshOrders();
       setReceipt({
         order: paid,
-        method: payment.method,
-        amount: paid.total,
-        reference: payment.reference.trim(),
+        payments: [
+          {
+            method: payment.method,
+            amount: paid.total,
+            reference: payment.reference.trim() || null,
+          },
+        ],
       });
     },
     onError: (error) => notify(errorMessage(error), 'error'),
@@ -133,8 +136,6 @@ export default function PosPage() {
     onError: (error) => notify(errorMessage(error), 'error'),
   });
 
-  // ---- Derived -----------------------------------------------------------
-
   const menuItems = menu?.items ?? [];
   const totals = computeTotals(order, cartSubtotal(cart, menuItems));
   const busy =
@@ -143,8 +144,6 @@ export default function PosPage() {
     saveMutation.isPending ||
     cancelMutation.isPending ||
     removeSavedItemMutation.isPending;
-
-  // ---- Handlers ----------------------------------------------------------
 
   /** Leaving the current order releases it. Warns first if it has unsaved items. */
   const leaveCurrentOrder = async (): Promise<boolean> => {
@@ -191,8 +190,6 @@ export default function PosPage() {
     removeSavedItemMutation.mutate(itemId);
   };
 
-  // ---- Effects -----------------------------------------------------------
-
   // Keep the lock alive. If it is lost (expired or force-unlocked), close the order.
   useOrderLock(order?.id ?? null, () => {
     reset();
@@ -200,7 +197,7 @@ export default function PosPage() {
     notify('This order was taken over or timed out. Reopen it from the list.', 'warning');
   });
 
-  // Admin "Resume" from the Orders page arrives here with the order id in router state.
+  // Resume from the Orders page arrives here with the order id in router state.
   useEffect(() => {
     const id = (location.state as { resumeOrderId?: number } | null)?.resumeOrderId;
     if (id) {
@@ -229,8 +226,6 @@ export default function PosPage() {
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
   }, [cart]);
-
-  // ---- Render ------------------------------------------------------------
 
   return (
     <Box
@@ -305,8 +300,8 @@ export default function PosPage() {
         onConfirm={(method, reference) => checkoutMutation.mutate({ method, reference })}
       />
       <SavedRoundDialog
+        order={savedRound?.order ?? null}
         round={savedRound?.round ?? null}
-        orderNo={savedRound?.orderNo ?? ''}
         onClose={() => setSavedRound(null)}
       />
       <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />

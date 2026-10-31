@@ -16,12 +16,16 @@ import { ordersApi } from '@/api/orders';
 import { useNotify } from '@/context/NotifyContext';
 import { errorMessage } from '@/lib/errors';
 import { ORDER_TYPE_LABEL, orderTitle } from '@/lib/format';
-import type { Order, OrderRound } from '@/types';
+import type { Order, OrderItem, OrderRound } from '@/types';
 
 type KitchenView = 'items' | 'orders';
 
+const isUnserved = (item: OrderItem) => !item.served_at;
+
 const preparingRounds = (order: Order) =>
-  order.rounds.filter((round) => round.status === 'preparing' && round.items.length > 0);
+  order.rounds.filter(
+    (round) => round.status === 'preparing' && round.items.some(isUnserved),
+  );
 
 const activeKitchenOrders = (orders: Order[]) =>
   orders.filter((order) => order.status !== 'cancelled' && preparingRounds(order).length > 0);
@@ -63,7 +67,7 @@ export default function KitchenPage() {
   const notify = useNotify();
   const { data, isLoading, error } = useQuery({
     queryKey: ['orders', 'kitchen'],
-    queryFn: ordersApi.listAll,
+    queryFn: ordersApi.listKitchen,
     refetchInterval: 5_000,
   });
   const markServed = useMutation({
@@ -72,6 +76,16 @@ export default function KitchenPage() {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
       queryClient.invalidateQueries({ queryKey: ['activity', orderId] });
       notify('Order marked served. Any rounds over 5 minutes late were recorded in the activity log.', 'success');
+    },
+    onError: (mutationError) => notify(errorMessage(mutationError), 'error'),
+  });
+  const markItemServed = useMutation({
+    mutationFn: ({ orderId, itemId }: { orderId: number; itemId: number }) =>
+      ordersApi.markItemServed(orderId, itemId),
+    onSuccess: (_order, { orderId }) => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['activity', orderId] });
+      notify('Item marked served.', 'success');
     },
     onError: (mutationError) => notify(errorMessage(mutationError), 'error'),
   });
@@ -100,7 +114,9 @@ export default function KitchenPage() {
   const orders = activeKitchenOrders(data ?? []);
   const tickets = orders.flatMap((order) =>
     preparingRounds(order).flatMap((round) =>
-      round.items.map((item) => ({ order, round, item })),
+      round.items
+        .filter(isUnserved)
+        .map((item) => ({ order, round, item })),
     ),
   );
 
@@ -142,7 +158,14 @@ export default function KitchenPage() {
               <Card key={`${order.id}-${round.id}-${item.id}`} variant="outlined">
                 <CardContent sx={{ display: 'grid', gap: 1 }}>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 1 }}>
-                    <Typography variant="h6" fontWeight={700}>{item.item_name}</Typography>
+                    <Box>
+                      <Typography variant="h6" fontWeight={700}>
+                        {item.item_name}{item.is_meal ? ' (Meal)' : ''}
+                      </Typography>
+                      {item.remarks && (
+                        <Typography variant="body2" color="text.secondary">{item.remarks}</Typography>
+                      )}
+                    </Box>
                     <Chip label={`× ${item.quantity}`} color="primary" />
                   </Box>
                   <Typography variant="body2">
@@ -158,6 +181,18 @@ export default function KitchenPage() {
                   >
                     {formatTimer(timer)}
                   </Typography>
+                  <Button
+                    variant="contained"
+                    color="success"
+                    onClick={() => markItemServed.mutate({ orderId: order.id, itemId: item.id })}
+                    disabled={markItemServed.isPending}
+                  >
+                    {markItemServed.isPending &&
+                    markItemServed.variables?.orderId === order.id &&
+                    markItemServed.variables.itemId === item.id
+                      ? 'Marking served…'
+                      : 'Mark served'}
+                  </Button>
                 </CardContent>
               </Card>
             );
@@ -189,9 +224,12 @@ export default function KitchenPage() {
                         </Typography>
                       </Box>
                       {round.items.map((item) => (
-                        <Typography key={item.id} variant="body2" color="text.secondary">
-                          {item.quantity} × {item.item_name}
-                        </Typography>
+                        isUnserved(item) && (
+                          <Typography key={item.id} variant="body2" color="text.secondary">
+                            {item.quantity} × {item.item_name}{item.is_meal ? ' (Meal)' : ''}
+                            {item.remarks ? ` — ${item.remarks}` : ''}
+                          </Typography>
+                        )
                       ))}
                     </Box>
                   ))}

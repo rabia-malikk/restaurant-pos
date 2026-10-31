@@ -2,7 +2,23 @@ import { ApiError } from '@/lib/errors';
 import type { User } from '@/types';
 import { http } from './client';
 
+export interface AdminSetupStatus {
+  adminExists: boolean;
+}
+
+export interface CreateInitialAdminPayload {
+  username: string;
+  name: string;
+  password: string;
+}
+
 export const authApi = {
+  adminSetupStatus: (): Promise<AdminSetupStatus> =>
+    http.get<AdminSetupStatus>('/auth/setup-status').then((r) => r.data),
+
+  createInitialAdmin: (payload: CreateInitialAdminPayload): Promise<void> =>
+    http.post('/auth/setup-admin', payload).then(() => undefined),
+
   login: (username: string, password: string, replaceSession = false): Promise<User> =>
     http.post<{ user: User }>('/auth/login', { username, password, replace_session: replaceSession }).then((r) => r.data.user),
 

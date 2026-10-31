@@ -10,12 +10,14 @@ import {
   Alert,
   Box,
   Button,
+  Checkbox,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   FormControl,
+  FormControlLabel,
   IconButton,
   InputLabel,
   MenuItem as SelectItem,
@@ -57,6 +59,8 @@ export default function MenuPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [price, setPrice] = useState('');
+  const [mealAvailable, setMealAvailable] = useState(false);
+  const [mealPrice, setMealPrice] = useState('');
   const [prepTime, setPrepTime] = useState('');
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState('');
@@ -93,6 +97,8 @@ export default function MenuPage() {
         name: string;
         description?: string;
         price: number;
+        meal_available: boolean;
+        meal_price: number;
         prep_time_minutes: number;
         image?: File;
       };
@@ -158,6 +164,8 @@ export default function MenuPage() {
     setName('');
     setDescription('');
     setPrice('');
+    setMealAvailable(false);
+    setMealPrice('');
     setPrepTime('');
     setImageFile(null);
     setImagePreview('');
@@ -179,6 +187,8 @@ export default function MenuPage() {
     setName(item.name);
     setDescription(item.description ?? '');
     setPrice(String(item.price));
+    setMealAvailable(item.meal_available);
+    setMealPrice(String(item.meal_price));
     setPrepTime(String(item.prep_time_minutes));
     setImageFile(null);
     setImagePreview(item.image_url ?? '');
@@ -241,6 +251,8 @@ export default function MenuPage() {
         name: name.trim(),
         description: description.trim(),
         price: Number(price),
+        meal_available: mealAvailable,
+        meal_price: mealAvailable ? Number(mealPrice) : 0,
         prep_time_minutes: Number(prepTime),
         image: imageFile ?? undefined,
       },
@@ -339,6 +351,7 @@ export default function MenuPage() {
               <TableCell>Item</TableCell>
               <TableCell>Category</TableCell>
               <TableCell align="right">Price</TableCell>
+              <TableCell align="right">Meal add-on</TableCell>
               <TableCell align="right">Prep time</TableCell>
               <TableCell align="center">Available</TableCell>
               <TableCell align="center">Actions</TableCell>
@@ -367,6 +380,9 @@ export default function MenuPage() {
                   )}
                 </TableCell>
                 <TableCell align="right">{formatMoney(item.price)}</TableCell>
+                <TableCell align="right">
+                  {item.meal_available ? `+${formatMoney(item.meal_price)}` : '—'}
+                </TableCell>
                 <TableCell align="right">{item.prep_time_minutes} min</TableCell>
                 <TableCell align="center">
                   <Switch
@@ -557,6 +573,26 @@ export default function MenuPage() {
               required
               inputProps={{ min: 0.01, step: 0.01 }}
             />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={mealAvailable}
+                  onChange={(event) => setMealAvailable(event.target.checked)}
+                />
+              }
+              label="Make it a meal"
+            />
+            {mealAvailable && (
+              <TextField
+                label="Meal add-on price"
+                type="number"
+                value={mealPrice}
+                onChange={(event) => setMealPrice(event.target.value)}
+                required
+                inputProps={{ min: 0, step: 0.01 }}
+                helperText="This amount is added to the menu item price."
+              />
+            )}
             <TextField
               label="Prep time (minutes)"
               type="number"

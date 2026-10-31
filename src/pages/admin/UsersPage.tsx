@@ -15,6 +15,7 @@ import {
   DialogTitle,
   FormControl,
   FormControlLabel,
+  FormGroup,
   IconButton,
   InputLabel,
   MenuItem,
@@ -28,6 +29,7 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Checkbox,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -35,7 +37,7 @@ import { usersApi } from '@/api/users';
 import { useNotify } from '@/context/NotifyContext';
 import { errorMessage } from '@/lib/errors';
 import { useAuthStore } from '@/store/authStore';
-import type { CreateUserPayload, Role, UpdateUserPayload, User } from '@/types';
+import type { CreateUserPayload, Role, UpdateUserPayload, User, UserFeature } from '@/types';
 
 type SaveUserVariables =
   | { id: null; payload: CreateUserPayload }
@@ -54,6 +56,7 @@ export default function UsersPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<Role>('staff');
+  const [features, setFeatures] = useState<UserFeature[]>([]);
   const [isActive, setIsActive] = useState(true);
 
   const refreshUsers = () => {
@@ -95,6 +98,7 @@ export default function UsersPage() {
     setUsername('');
     setPassword('');
     setRole('staff');
+    setFeatures([]);
     setIsActive(true);
   };
 
@@ -109,6 +113,7 @@ export default function UsersPage() {
     setUsername(user.username);
     setPassword('');
     setRole(user.role);
+    setFeatures(user.features);
     setIsActive(user.is_active);
     setDialogOpen(true);
   };
@@ -126,6 +131,7 @@ export default function UsersPage() {
       username: username.trim(),
       role,
       is_active: isActive,
+      features: role === 'staff' ? features : [],
     };
     if (!fields.name || !fields.username) {
       notify('Name and username are required.', 'error');
@@ -168,6 +174,11 @@ export default function UsersPage() {
   }
 
   const canCreateUser = roleHasCapacity(role);
+  const toggleFeature = (feature: UserFeature, checked: boolean) => {
+    setFeatures((current) =>
+      checked ? [...current, feature] : current.filter((value) => value !== feature),
+    );
+  };
 
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1000, mx: 'auto' }}>
@@ -298,6 +309,29 @@ export default function UsersPage() {
                 </MenuItem>
               </Select>
             </FormControl>
+            {role === 'staff' && (
+              <Box>
+                <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Features available to this staff user</Typography>
+                <FormGroup>
+                  {([
+                    ['orders', 'Orders'],
+                    ['menu', 'Menu'],
+                    ['kitchen', 'Kitchen'],
+                  ] as const).map(([feature, label]) => (
+                    <FormControlLabel
+                      key={feature}
+                      control={
+                        <Checkbox
+                          checked={features.includes(feature)}
+                          onChange={(_, checked) => toggleFeature(feature, checked)}
+                        />
+                      }
+                      label={label}
+                    />
+                  ))}
+                </FormGroup>
+              </Box>
+            )}
             <FormControlLabel
               control={
                 <Switch

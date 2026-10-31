@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Box, Button, ButtonBase, Chip, CircularProgress, Divider, Paper, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import CancelOutlinedIcon from '@mui/icons-material/CancelOutlined';
@@ -17,6 +18,13 @@ interface Props {
 
 /** Left panel. Staff see their own resumable orders; admins see everyone's. */
 export default function DraftsPanel({ orders, loading, activeId, isAdmin, busy, onResume, onNew, onCancel }: Props) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <Box sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
@@ -81,7 +89,7 @@ export default function DraftsPanel({ orders, loading, activeId, isAdmin, busy, 
                 </Box>
                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
                   {isAdmin ? `${order.created_by_name}, ` : ''}
-                  saved {formatTime(order.updated_at)}
+                  Created {formatTime(order.created_at)} · {formatElapsed(order.created_at, now)}
                 </Typography>
               </ButtonBase>
               <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 1, pb: 0.5 }}>
@@ -101,4 +109,20 @@ export default function DraftsPanel({ orders, loading, activeId, isAdmin, busy, 
       </Box>
     </Box>
   );
+}
+
+function formatElapsed(createdAt: string, now: number): string {
+  const created = new Date(createdAt).getTime();
+  if (!Number.isFinite(created)) return 'time unavailable';
+
+  const minutes = Math.max(0, Math.floor((now - created) / 60_000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return `${hours}h ${remainingMinutes}m ago`;
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h ago`;
 }

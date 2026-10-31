@@ -1,9 +1,9 @@
 import { Navigate, Outlet } from 'react-router-dom';
 import { Box, CircularProgress } from '@mui/material';
 import { useAuthStore } from '@/store/authStore';
-import type { Role } from '@/types';
+import type { Role, UserFeature } from '@/types';
 
-export default function ProtectedRoute({ roles }: { roles?: Role[] }) {
+export default function ProtectedRoute({ roles, features }: { roles?: Role[]; features?: UserFeature[] }) {
   const user = useAuthStore((s) => s.user);
   const status = useAuthStore((s) => s.status);
 
@@ -16,5 +16,8 @@ export default function ProtectedRoute({ roles }: { roles?: Role[] }) {
   }
   if (!user) return <Navigate to="/login" replace />;
   if (roles && !roles.includes(user.role)) return <Navigate to="/pos" replace />;
+  if (features && user.role !== 'admin' && !features.some((feature) => user.features.includes(feature))) {
+    return <Navigate to="/pos" replace />;
+  }
   return <Outlet />;
 }

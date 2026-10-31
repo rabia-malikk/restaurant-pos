@@ -5,9 +5,11 @@ import { DataGrid, type GridColDef } from '@mui/x-data-grid';
 import { Box, Button, Chip, Typography } from '@mui/material';
 import { ordersApi } from '@/api/orders';
 import ActivityLogDrawer from '@/components/admin/ActivityLogDrawer';
+import ReceiptDialog from '@/components/pos/ReceiptDialog';
 import { useNotify } from '@/context/NotifyContext';
 import { useAllOrders } from '@/hooks/useOrders';
 import { errorMessage } from '@/lib/errors';
+import { useAuthStore } from '@/store/authStore';
 import { formatDateTime, formatMoney, orderTitle, ORDER_TYPE_LABEL, STATUS_LABEL } from '@/lib/format';
 import type { Order } from '@/types';
 
@@ -17,10 +19,19 @@ const isLocked = (o: Order) =>
 
 export default function OrdersPage() {
   const navigate = useNavigate();
+  const user = useAuthStore((state) => state.user);
+  const isAdmin = user?.role === 'admin';
   const notify = useNotify();
   const queryClient = useQueryClient();
   const { data = [], isLoading } = useAllOrders();
   const [logOrderId, setLogOrderId] = useState<number | null>(null);
+  const [receipt, setReceipt] = useState<Awaited<ReturnType<typeof ordersApi.getReceipt>> | null>(null);
+
+  const printSlip = useMutation({
+    mutationFn: (id: number) => ordersApi.getReceipt(id),
+    onSuccess: setReceipt,
+    onError: (error) => notify(errorMessage(error), 'error'),
+  });
 
   const unlock = useMutation({
     mutationFn: (id: number) => ordersApi.forceUnlock(id),
@@ -76,20 +87,29 @@ export default function OrdersPage() {
     {
       field: 'actions',
       headerName: '',
-      width: 330,
+      width: isAdmin ? 420 : 170,
       sortable: false,
       filterable: false,
       renderCell: ({ row }) => (
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', height: '100%' }}>
-          <Button size="small" onClick={() => setLogOrderId(row.id)}>
-            Activity
+          <Button
+            size="small"
+            disabled={row.status !== 'checked_out' || printSlip.isPending}
+            onClick={() => printSlip.mutate(row.id)}
+          >
+            Print slip
           </Button>
+          {isAdmin && (
+            <Button size="small" onClick={() => setLogOrderId(row.id)}>
+              Activity
+            </Button>
+          )}
           {isOpen(row) && !isLocked(row) && (
             <Button size="small" variant="contained" onClick={() => navigate('/pos', { state: { resumeOrderId: row.id } })}>
               Resume
             </Button>
           )}
-          {isOpen(row) && isLocked(row) && (
+          {isAdmin && isOpen(row) && isLocked(row) && (
             <Button size="small" color="secondary" variant="outlined" onClick={() => unlock.mutate(row.id)}>
               Force unlock
             </Button>
@@ -102,7 +122,7 @@ export default function OrdersPage() {
   return (
     <Box sx={{ p: { xs: 2, md: 3 } }}>
       <Typography variant="h5" gutterBottom>
-        All orders
+        {isAdmin ? 'All orders' : 'My orders'}
       </Typography>
       <Box sx={{ height: 'calc(100vh - 190px)', minHeight: 360, bgcolor: 'background.paper' }}>
         <DataGrid
@@ -114,7 +134,8 @@ export default function OrdersPage() {
           initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
         />
       </Box>
-      <ActivityLogDrawer orderId={logOrderId} onClose={() => setLogOrderId(null)} />
+      {isAdmin && <ActivityLogDrawer orderId={logOrderId} onClose={() => setLogOrderId(null)} />}
+      <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />
     </Box>
   );
 }

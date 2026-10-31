@@ -97,7 +97,7 @@ export default function DashboardPage() {
           sx={{ width: 88, height: 88, objectFit: 'contain', mb: 1.5 }}
         />
         <Typography variant="h5" fontWeight={800} sx={{ letterSpacing: { xs: 0, sm: '0.04em' } }}>
-          BUILT TO SERVE. MADE TO SIZZLE.
+          Normal Is Boring
         </Typography>
         <Typography color="text.secondary" sx={{ mt: 1 }}>
           HAWT POS • Orders • Payments • Performance

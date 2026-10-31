@@ -1,10 +1,14 @@
 import { useEffect } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Alert, Box, Button, CircularProgress } from '@mui/material';
+import { useQuery } from '@tanstack/react-query';
+import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
+import { authApi } from '@/api/auth';
 import { setUnauthorizedHandler } from '@/api/client';
 import { useAuthStore } from '@/store/authStore';
 import AppLayout from '@/components/layout/AppLayout';
 import ProtectedRoute from '@/components/layout/ProtectedRoute';
 import LoginPage from '@/pages/LoginPage';
+import AdminSetupPage from '@/pages/AdminSetupPage';
 import PosPage from '@/pages/PosPage';
 import NotFoundPage from '@/pages/NotFoundPage';
 import DashboardPage from '@/pages/admin/DashboardPage';
@@ -22,27 +26,70 @@ export default function App() {
 
   return (
     <Routes>
-      <Route path="/login" element={<LoginPage />} />
+      <Route element={<InitialAdminGate />}>
+        <Route path="/setup-admin" element={<AdminSetupPage />} />
+        <Route path="/login" element={<LoginPage />} />
 
-      {/* Any signed-in user */}
-      <Route element={<ProtectedRoute />}>
-        <Route element={<AppLayout />}>
-          <Route path="/pos" element={<PosPage />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<AppLayout />}>
+            <Route path="/pos" element={<PosPage />} />
 
-          {/* Admin only */}
-          <Route element={<ProtectedRoute roles={['admin']} />}>
-            <Route path="/admin" element={<DashboardPage />} />
-            <Route path="/admin/orders" element={<OrdersPage />} />
-            <Route path="/admin/menu" element={<MenuPage />} />
-            <Route path="/admin/inventory" element={<InventoryPage />} />
-            <Route path="/admin/kitchen" element={<KitchenPage />} />
-            <Route path="/admin/users" element={<UsersPage />} />
+            <Route element={<ProtectedRoute roles={['admin']} />}>
+              <Route path="/admin" element={<DashboardPage />} />
+              <Route path="/admin/inventory" element={<InventoryPage />} />
+              <Route path="/admin/users" element={<UsersPage />} />
+            </Route>
+            <Route element={<ProtectedRoute features={['orders']} />}>
+              <Route path="/admin/orders" element={<OrdersPage />} />
+            </Route>
+            <Route element={<ProtectedRoute features={['menu']} />}>
+              <Route path="/admin/menu" element={<MenuPage />} />
+            </Route>
+            <Route element={<ProtectedRoute features={['kitchen']} />}>
+              <Route path="/admin/kitchen" element={<KitchenPage />} />
+            </Route>
           </Route>
         </Route>
-      </Route>
 
-      <Route path="/" element={<Navigate to="/pos" replace />} />
-      <Route path="*" element={<NotFoundPage />} />
+        <Route path="/" element={<Navigate to="/pos" replace />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
     </Routes>
   );
+}
+
+function InitialAdminGate() {
+  const location = useLocation();
+  const { data, error, isLoading, refetch } = useQuery({
+    queryKey: ['auth', 'admin-setup-status'],
+    queryFn: authApi.adminSetupStatus,
+    staleTime: Infinity,
+    retry: 1,
+  });
+
+  if (isLoading) {
+    return (
+      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+        <CircularProgress aria-label="Checking initial setup" />
+      </Box>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center', p: 2 }}>
+        <Alert
+          severity="error"
+          action={<Button color="inherit" size="small" onClick={() => refetch()}>Retry</Button>}
+        >
+          Could not check whether an admin account exists. Check the API/database connection and retry.
+        </Alert>
+      </Box>
+    );
+  }
+
+  const isSetupPage = location.pathname === '/setup-admin';
+  if (!data.adminExists && !isSetupPage) return <Navigate to="/setup-admin" replace />;
+  if (data.adminExists && isSetupPage) return <Navigate to="/login" replace />;
+  return <Outlet />;
 }

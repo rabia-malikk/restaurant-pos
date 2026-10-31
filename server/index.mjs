@@ -11,6 +11,7 @@ import { Server as SocketServer } from 'socket.io';
 const API_PORT = Number(process.env.API_PORT ?? 3000);
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const USER_FEATURES = new Set(['orders', 'menu', 'kitchen']);
 
 if (!process.env.DB_USER || !process.env.DB_PASSWORD || !process.env.DB_NAME) {
   throw new Error('Set DB_USER, DB_PASSWORD, and DB_NAME in the root .env file.');
@@ -81,6 +82,12 @@ function number(value) {
   return Number(value ?? 0);
 }
 
+function discountAmount(subtotal, type, value) {
+  const requested = Math.max(0, number(value));
+  const amount = type === 'percentage' ? subtotal * Math.min(requested, 100) / 100 : requested;
+  return Math.min(subtotal, Math.round(amount * 100) / 100);
+}
+
 function publicUser(row) {
   return {
     id: number(row.id),
@@ -88,6 +95,7 @@ function publicUser(row) {
     username: row.username,
     role: row.role,
     is_active: Boolean(row.is_active),
+    features: row.features ?? [],
   };
 }
 
@@ -102,6 +110,12 @@ function requiredText(value, label, maxLength) {
     throw new HttpError(400, `${label} is required and must be at most ${maxLength} characters.`);
   }
   return value.trim();
+}
+
+function booleanValue(value, label) {
+  if (value === true || value === 1 || value === 'true' || value === '1') return true;
+  if (value === false || value === 0 || value === 'false' || value === '0') return false;
+  throw new HttpError(400, `${label} must be true or false.`);
 }
 
 function setSessionCookie(res, token) {
@@ -136,7 +150,9 @@ async function sessionForToken(token) {
       LIMIT 1`,
     [tokenHash],
   );
-  return result[0] ? publicUser(result[0]) : null;
+  return result[0]
+    ? publicUser({ ...result[0], features: await userFeatures(result[0].id) })
+    : null;
 }
 
 const requireAuth = route(async (req, _res, next) => {
@@ -150,6 +166,39 @@ const requireAuth = route(async (req, _res, next) => {
 function requireAdmin(req, _res, next) {
   if (req.user?.role !== 'admin') return next(new HttpError(403, 'Only admins can do this.'));
   next();
+}
+
+function requireFeature(feature) {
+  return (req, _res, next) => {
+    if (req.user?.role === 'admin' || req.user?.features?.includes(feature)) return next();
+    next(new HttpError(403, `You do not have access to ${feature}.`));
+  };
+}
+
+function parseUserFeatures(value, label = 'features') {
+  if (!Array.isArray(value) || value.some((feature) => typeof feature !== 'string' || !USER_FEATURES.has(feature))) {
+    throw new HttpError(400, `${label} must contain only orders, menu, or kitchen.`);
+  }
+  return [...new Set(value)];
+}
+
+async function userFeatures(userId, connection = pool) {
+  const result = await rows(
+    'SELECT feature_key FROM user_features WHERE user_id = ? ORDER BY feature_key',
+    [userId],
+    connection,
+  );
+  return result.map((row) => row.feature_key);
+}
+
+async function userWithFeatures(userId, connection = pool) {
+  const [user] = await rows(
+    'SELECT id, name, username, role, is_active FROM users WHERE id = ?',
+    [userId],
+    connection,
+  );
+  if (!user) return null;
+  return publicUser({ ...user, features: await userFeatures(userId, connection) });
 }
 
 function isOpenStatus(status) {
@@ -204,6 +253,8 @@ function mapOrder(row, rounds) {
     rounds,
     subtotal: number(row.subtotal),
     discount: number(row.discount),
+    discount_type: row.discount_type ?? 'amount',
+    discount_value: number(row.discount_value ?? row.discount),
     tax: number(row.tax),
     delivery_fee: number(row.delivery_fee),
     total: number(row.total),
@@ -236,7 +287,7 @@ async function getOrder(id, connection = pool) {
   for (const round of roundRows) {
     const itemRows = await rows(
       `SELECT id, round_id, menu_item_id, item_name, unit_price, prep_time_minutes,
-              quantity, line_total
+              quantity, line_total, is_meal, remarks, served_at
          FROM order_items
         WHERE round_id = ? AND voided_at IS NULL
         ORDER BY id`,
@@ -260,6 +311,9 @@ async function getOrder(id, connection = pool) {
         prep_time_minutes: number(item.prep_time_minutes),
         quantity: number(item.quantity),
         line_total: number(item.line_total),
+        is_meal: Boolean(item.is_meal),
+        remarks: item.remarks ?? null,
+        served_at: dateIso(item.served_at),
       })),
     });
   }
@@ -390,6 +444,84 @@ app.get('/api/health', route(async (_req, res) => {
 }));
 
 // Authentication
+app.get('/api/auth/setup-status', route(async (_req, res) => {
+  const [admin] = await rows("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+  res.json({ adminExists: Boolean(admin) });
+}));
+
+app.post('/api/auth/setup-admin', route(async (req, res) => {
+  const username = typeof req.body?.username === 'string' ? req.body.username.trim().toLowerCase() : '';
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+  if (!/^[a-z0-9._-]{1,50}$/.test(username)) {
+    throw new HttpError(400, 'Username may contain lowercase letters, digits, dots, underscores, and hyphens.');
+  }
+  if (!name || name.length > 100) {
+    throw new HttpError(400, 'Admin name is required and must be at most 100 characters.');
+  }
+  if (password.length < 8 || password.length > 200) {
+    throw new HttpError(400, 'Password must contain 8 to 200 characters.');
+  }
+
+  const connection = await pool.getConnection();
+  let lockAcquired = false;
+  let transactionStarted = false;
+  try {
+    const [lock] = await rows('SELECT GET_LOCK(?, 10) AS acquired', ['hawt_pos.initial_admin_setup'], connection);
+    if (number(lock?.acquired) !== 1) throw new HttpError(503, 'Initial admin setup is busy. Please try again.');
+    lockAcquired = true;
+
+    await connection.beginTransaction();
+    transactionStarted = true;
+    const [adminLimit] = await rows(
+      "SELECT value FROM app_config WHERE config_key = 'limit.max_admin_users' FOR UPDATE",
+      [],
+      connection,
+    );
+    if (!adminLimit) throw new HttpError(500, 'The admin user limit is missing from app_config.');
+
+    const admins = await rows("SELECT id FROM users WHERE role = 'admin' LIMIT 1", [], connection);
+    if (admins.length) throw new HttpError(409, 'An admin account already exists.');
+
+    const activeAdmins = await rows(
+      "SELECT COUNT(*) AS total FROM users WHERE role = 'admin' AND is_active = 1",
+      [],
+      connection,
+    );
+    const maximumAdmins = Number(adminLimit.value);
+    if (maximumAdmins !== -1 && number(activeAdmins[0]?.total) >= maximumAdmins) {
+      throw new HttpError(403, 'The active admin user limit has been reached.');
+    }
+
+    const existingUsername = await rows('SELECT id FROM users WHERE username = ? LIMIT 1', [username], connection);
+    if (existingUsername.length) throw new HttpError(409, 'That username already exists.');
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    await rows(
+      'INSERT INTO users (name, username, password_hash, role, is_active) VALUES (?, ?, ?, ?, 1)',
+      [name, username, passwordHash, 'admin'],
+      connection,
+    );
+    await connection.commit();
+    transactionStarted = false;
+    res.status(201).json({ created: true });
+  } catch (error) {
+    if (transactionStarted) await connection.rollback();
+    throw error;
+  } finally {
+    if (lockAcquired) {
+      try {
+        await rows('SELECT RELEASE_LOCK(?)', ['hawt_pos.initial_admin_setup'], connection);
+      } catch (error) {
+        connection.destroy();
+        throw error;
+      }
+    }
+    connection.release();
+  }
+}));
+
 app.post('/api/auth/login', route(async (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim().toLowerCase() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -493,7 +625,13 @@ app.post('/api/auth/login', route(async (req, res) => {
       [found.id, tokenHash, (req.get('user-agent') ?? '').slice(0, 255), req.ip],
       connection,
     );
-    return { previousSessions: activeSessions, authenticatedUser: lockedUser };
+    return {
+      previousSessions: activeSessions,
+      authenticatedUser: {
+        ...lockedUser,
+        features: await userFeatures(lockedUser.id, connection),
+      },
+    };
   });
   if (previousSessions.length) {
     io.to(`user:${number(found.id)}`).emit('session:revoked');
@@ -526,7 +664,9 @@ app.get('/api/users', requireAuth, requireAdmin, route(async (_req, res) => {
   const result = await rows(
     'SELECT id, name, username, role, is_active FROM users ORDER BY role, name',
   );
-  res.json(result.map(publicUser));
+  res.json(await Promise.all(result.map(async (user) =>
+    publicUser({ ...user, features: await userFeatures(user.id) }),
+  )));
 }));
 
 app.get('/api/users/capacity', requireAuth, requireAdmin, route(async (_req, res) => {
@@ -551,6 +691,9 @@ app.post('/api/users', requireAuth, requireAdmin, route(async (req, res) => {
   const isActive = req.body?.is_active !== false;
   if (!['admin', 'staff'].includes(role)) throw new HttpError(400, 'Role must be admin or staff.');
   if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters.');
+  const features = role === 'staff'
+    ? req.body?.features === undefined ? [] : parseUserFeatures(req.body.features)
+    : [];
   const passwordHash = await bcrypt.hash(password, 12);
 
   const id = await transaction(async (connection) => {
@@ -561,13 +704,16 @@ app.post('/api/users', requireAuth, requireAdmin, route(async (req, res) => {
       [name, username, passwordHash, role, isActive ? 1 : 0, req.user.id],
       connection,
     );
+    for (const feature of features) {
+      await rows(
+        'INSERT INTO user_features (user_id, feature_key) VALUES (?, ?)',
+        [result.insertId, feature],
+        connection,
+      );
+    }
     return number(result.insertId);
   });
-  const [created] = await rows(
-    'SELECT id, name, username, role, is_active FROM users WHERE id = ?',
-    [id],
-  );
-  res.status(201).json(publicUser(created));
+  res.status(201).json(await userWithFeatures(id));
 }));
 
 app.patch('/api/users/:id', requireAuth, requireAdmin, route(async (req, res) => {
@@ -592,6 +738,12 @@ app.patch('/api/users/:id', requireAuth, requireAdmin, route(async (req, res) =>
   if (password !== undefined && (typeof password !== 'string' || password.length < 8)) {
     throw new HttpError(400, 'Password must be at least 8 characters.');
   }
+  const existingFeatures = await userFeatures(id);
+  const features = role === 'admin'
+    ? []
+    : req.body?.features === undefined
+      ? existingFeatures
+      : parseUserFeatures(req.body.features);
   const hash = password ? await bcrypt.hash(password, 12) : null;
 
   await transaction(async (connection) => {
@@ -607,6 +759,14 @@ app.patch('/api/users/:id', requireAuth, requireAdmin, route(async (req, res) =>
       [name, username, role, isActive ? 1 : 0, hash, id],
       connection,
     );
+    await rows('DELETE FROM user_features WHERE user_id = ?', [id], connection);
+    for (const feature of features) {
+      await rows(
+        'INSERT INTO user_features (user_id, feature_key) VALUES (?, ?)',
+        [id, feature],
+        connection,
+      );
+    }
     if (hash) {
       const token = id === req.user.id ? cookieValue(req, 'pos_session') : null;
       const currentTokenHash = token ? createHash('sha256').update(token).digest('hex') : '';
@@ -637,11 +797,8 @@ app.patch('/api/users/:id', requireAuth, requireAdmin, route(async (req, res) =>
       );
     }
   });
-  const [updated] = await rows(
-    'SELECT id, name, username, role, is_active FROM users WHERE id = ?',
-    [id],
-  );
-  res.json(publicUser(updated));
+  io.to(`user:${id}`).emit('permissions:updated');
+  res.json(await userWithFeatures(id));
 }));
 
 app.delete('/api/users/:id', requireAuth, requireAdmin, route(async (req, res) => {
@@ -681,7 +838,7 @@ app.get('/api/documents/:id', requireAuth, route(async (req, res) => {
 }));
 
 app.get('/api/menu', requireAuth, route(async (req, res) => {
-  const adminView = req.user.role === 'admin';
+  const adminView = req.user.role === 'admin' || req.user.features.includes('menu');
   const categories = await rows(
     `SELECT id, name, sort_order, is_active FROM categories
       ${adminView ? '' : 'WHERE is_active = 1'}
@@ -689,6 +846,7 @@ app.get('/api/menu', requireAuth, route(async (req, res) => {
   );
   const items = await rows(
     `SELECT mi.id, mi.category_id, mi.name, mi.description, mi.price,
+            mi.meal_available, mi.meal_price,
             mi.prep_time_minutes, mi.image_document_id, mi.is_available, c.is_active AS category_is_active
        FROM menu_items mi
        JOIN categories c ON c.id = mi.category_id
@@ -709,6 +867,8 @@ app.get('/api/menu', requireAuth, route(async (req, res) => {
       description: item.description ?? undefined,
       image_url: item.image_document_id ? `/api/documents/${number(item.image_document_id)}` : undefined,
       price: number(item.price),
+      meal_available: Boolean(item.meal_available),
+      meal_price: number(item.meal_price),
       prep_time_minutes: number(item.prep_time_minutes),
       is_available: Boolean(item.is_available),
       category_is_active: Boolean(item.category_is_active),
@@ -716,7 +876,7 @@ app.get('/api/menu', requireAuth, route(async (req, res) => {
   });
 }));
 
-app.post('/api/menu/categories', requireAuth, requireAdmin, route(async (req, res) => {
+app.post('/api/menu/categories', requireAuth, requireFeature('menu'), route(async (req, res) => {
   const name = requiredText(req.body?.name, 'Category name', 100);
   const [nextSort] = await rows('SELECT COALESCE(MAX(sort_order), 0) + 1 AS sort_order FROM categories');
   const result = await rows(
@@ -733,7 +893,7 @@ app.post('/api/menu/categories', requireAuth, requireAdmin, route(async (req, re
   res.status(201).json(category);
 }));
 
-app.patch('/api/menu/categories/:id', requireAuth, requireAdmin, route(async (req, res) => {
+app.patch('/api/menu/categories/:id', requireAuth, requireFeature('menu'), route(async (req, res) => {
   const id = parseId(req.params.id, 'category id');
   const hasName = req.body?.name !== undefined;
   const hasActive = req.body?.is_active !== undefined;
@@ -761,7 +921,7 @@ app.patch('/api/menu/categories/:id', requireAuth, requireAdmin, route(async (re
   res.json(category);
 }));
 
-app.delete('/api/menu/categories/:id', requireAuth, requireAdmin, route(async (req, res) => {
+app.delete('/api/menu/categories/:id', requireAuth, requireFeature('menu'), route(async (req, res) => {
   const id = parseId(req.params.id, 'category id');
   const result = await rows(
     'UPDATE categories SET is_active = 0 WHERE id = ? AND is_active = 1',
@@ -772,13 +932,16 @@ app.delete('/api/menu/categories/:id', requireAuth, requireAdmin, route(async (r
   res.status(204).end();
 }));
 
-app.post('/api/menu/items', requireAuth, requireAdmin, upload.single('image'), route(async (req, res) => {
+app.post('/api/menu/items', requireAuth, requireFeature('menu'), upload.single('image'), route(async (req, res) => {
   const categoryId = parseId(req.body?.category_id, 'category id');
   const name = requiredText(req.body?.name, 'Item name', 150);
   const description = typeof req.body?.description === 'string' ? req.body.description.trim() : null;
   const price = Number(req.body?.price);
+  const mealAvailable = booleanValue(req.body?.meal_available ?? false, 'meal_available');
+  const mealPrice = Number(req.body?.meal_price ?? 0);
   const prepTime = Number(req.body?.prep_time_minutes);
   if (!Number.isFinite(price) || price <= 0) throw new HttpError(400, 'Price must be greater than zero.');
+  if (!Number.isFinite(mealPrice) || mealPrice < 0) throw new HttpError(400, 'Meal price must be zero or greater.');
   if (!Number.isInteger(prepTime) || prepTime < 0 || prepTime > 65535) {
     throw new HttpError(400, 'Prep time must be a whole number of minutes.');
   }
@@ -787,9 +950,11 @@ app.post('/api/menu/items', requireAuth, requireAdmin, upload.single('image'), r
   const imageId = req.file ? await saveImage(req.file, req.user.id) : null;
   const result = await rows(
     `INSERT INTO menu_items
-       (category_id, name, description, price, prep_time_minutes, image_document_id, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [categoryId, name, description, price, prepTime, imageId, req.user.id],
+       (category_id, name, description, price, meal_available, meal_price,
+        prep_time_minutes, image_document_id, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [categoryId, name, description, price, mealAvailable ? 1 : 0, mealAvailable ? mealPrice : 0,
+       prepTime, imageId, req.user.id],
   );
   const item = {
     id: number(result.insertId),
@@ -798,6 +963,8 @@ app.post('/api/menu/items', requireAuth, requireAdmin, upload.single('image'), r
     description: description ?? undefined,
     image_url: imageId ? `/api/documents/${imageId}` : undefined,
     price,
+    meal_available: mealAvailable,
+    meal_price: mealAvailable ? mealPrice : 0,
     prep_time_minutes: prepTime,
     is_available: true,
   };
@@ -811,10 +978,10 @@ app.post('/api/menu/items', requireAuth, requireAdmin, upload.single('image'), r
   res.status(201).json(item);
 }));
 
-app.patch('/api/menu/items/:id', requireAuth, requireAdmin, upload.single('image'), route(async (req, res) => {
+app.patch('/api/menu/items/:id', requireAuth, requireFeature('menu'), upload.single('image'), route(async (req, res) => {
   const id = parseId(req.params.id);
   const [existing] = await rows(
-    `SELECT id, category_id, name, description, price, prep_time_minutes,
+    `SELECT id, category_id, name, description, price, meal_available, meal_price, prep_time_minutes,
             image_document_id, is_available
        FROM menu_items WHERE id = ? AND is_active = 1`,
     [id],
@@ -826,6 +993,12 @@ app.patch('/api/menu/items/:id', requireAuth, requireAdmin, upload.single('image
     ? existing.description
     : String(req.body.description).trim() || null;
   const price = req.body?.price === undefined ? number(existing.price) : Number(req.body.price);
+  const mealAvailable = req.body?.meal_available === undefined
+    ? Boolean(existing.meal_available)
+    : booleanValue(req.body.meal_available, 'meal_available');
+  const mealPrice = req.body?.meal_price === undefined
+    ? number(existing.meal_price)
+    : Number(req.body.meal_price);
   const prepTime = req.body?.prep_time_minutes === undefined
     ? number(existing.prep_time_minutes)
     : Number(req.body.prep_time_minutes);
@@ -835,6 +1008,7 @@ app.patch('/api/menu/items/:id', requireAuth, requireAdmin, upload.single('image
       : req.body.is_available === 'false' ? false
         : req.body.is_available;
   if (!Number.isFinite(price) || price <= 0) throw new HttpError(400, 'Price must be greater than zero.');
+  if (!Number.isFinite(mealPrice) || mealPrice < 0) throw new HttpError(400, 'Meal price must be zero or greater.');
   if (!Number.isInteger(prepTime) || prepTime < 0 || prepTime > 65535) {
     throw new HttpError(400, 'Prep time must be a whole number of minutes.');
   }
@@ -847,9 +1021,11 @@ app.patch('/api/menu/items/:id', requireAuth, requireAdmin, upload.single('image
   await rows(
     `UPDATE menu_items
         SET category_id = ?, name = ?, description = ?, price = ?,
-            prep_time_minutes = ?, image_document_id = ?, is_available = ?
+            meal_available = ?, meal_price = ?, prep_time_minutes = ?,
+            image_document_id = ?, is_available = ?
       WHERE id = ?`,
-    [categoryId, name, description, price, prepTime, imageId, isAvailable ? 1 : 0, id],
+    [categoryId, name, description, price, mealAvailable ? 1 : 0,
+      mealAvailable ? mealPrice : 0, prepTime, imageId, isAvailable ? 1 : 0, id],
   );
   if (req.file && existing.image_document_id) {
     await rows('UPDATE documents SET deleted_at = UTC_TIMESTAMP() WHERE id = ?', [existing.image_document_id]);
@@ -861,6 +1037,8 @@ app.patch('/api/menu/items/:id', requireAuth, requireAdmin, upload.single('image
     description: description ?? undefined,
     image_url: imageId ? `/api/documents/${number(imageId)}` : undefined,
     price,
+    meal_available: mealAvailable,
+    meal_price: mealAvailable ? mealPrice : 0,
     prep_time_minutes: prepTime,
     is_available: Boolean(isAvailable),
   };
@@ -868,7 +1046,7 @@ app.patch('/api/menu/items/:id', requireAuth, requireAdmin, upload.single('image
   res.json(item);
 }));
 
-app.delete('/api/menu/items/:id', requireAuth, requireAdmin, route(async (req, res) => {
+app.delete('/api/menu/items/:id', requireAuth, requireFeature('menu'), route(async (req, res) => {
   const id = parseId(req.params.id);
   await transaction(async (connection) => {
     const [item] = await rows(
@@ -991,9 +1169,53 @@ app.get('/api/orders', requireAuth, route(async (req, res) => {
   res.json(await Promise.all(result.map((order) => getOrder(number(order.id)))));
 }));
 
-app.get('/api/orders/all', requireAuth, requireAdmin, route(async (_req, res) => {
+app.get('/api/orders/all', requireAuth, requireFeature('orders'), route(async (req, res) => {
+  const isAdmin = req.user.role === 'admin';
+  const result = await rows(
+    `SELECT id FROM orders ${isAdmin ? '' : 'WHERE created_by = ?'} ORDER BY updated_at DESC`,
+    isAdmin ? [] : [req.user.id],
+  );
+  res.json(await Promise.all(result.map((order) => getOrder(number(order.id)))));
+}));
+
+app.get('/api/orders/kitchen', requireAuth, requireFeature('kitchen'), route(async (_req, res) => {
   const result = await rows('SELECT id FROM orders ORDER BY updated_at DESC');
   res.json(await Promise.all(result.map((order) => getOrder(number(order.id)))));
+}));
+
+app.get('/api/customers', requireAuth, route(async (req, res) => {
+  const contactNumber = typeof req.query.contact_number === 'string'
+    ? req.query.contact_number.trim()
+    : '';
+  if (!contactNumber || contactNumber.length > 40) {
+    throw new HttpError(400, 'Enter a valid contact number.');
+  }
+  const [customer] = await rows(
+    'SELECT contact_number, full_name FROM customer_master WHERE contact_number = ?',
+    [contactNumber],
+  );
+  res.json(customer
+    ? { contact_number: customer.contact_number, full_name: customer.full_name }
+    : null);
+}));
+
+app.get('/api/orders/:id/receipt', requireAuth, requireFeature('orders'), route(async (req, res) => {
+  const id = parseId(req.params.id);
+  const order = await getOrder(id);
+  assertOrderAccess(order, req.user);
+  if (order.status !== 'checked_out') throw new HttpError(409, 'Only paid orders have a sale receipt.');
+  const payments = await rows(
+    'SELECT method, amount, reference FROM payments WHERE order_id = ? ORDER BY id',
+    [id],
+  );
+  res.json({
+    order,
+    payments: payments.map((payment) => ({
+      method: payment.method,
+      amount: number(payment.amount),
+      reference: payment.reference,
+    })),
+  });
 }));
 
 app.post('/api/orders', requireAuth, route(async (req, res) => {
@@ -1032,8 +1254,9 @@ app.post('/api/orders', requireAuth, route(async (req, res) => {
     );
     const orderNo = `${today.replace(/-/g, '')}-${String(counter.last_no).padStart(4, '0')}`;
     const result = await rows(
-      `INSERT INTO orders (order_no, order_type, created_by, locked_by, locked_at, lock_expires_at)
-       VALUES (?, ?, ?, ?, UTC_TIMESTAMP(),
+      `INSERT INTO orders
+         (order_no, order_type, created_by, locked_by, created_at, updated_at, locked_at, lock_expires_at)
+       VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP(),
                DATE_ADD(UTC_TIMESTAMP(), INTERVAL ${await readLockTimeout(connection)} MINUTE))`,
       [orderNo, orderType, req.user.id, req.user.id],
       connection,
@@ -1106,9 +1329,20 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
   const normalized = items.map((item) => ({
     menu_item_id: parseId(item?.menu_item_id, 'menu item id'),
     quantity: Number(item?.quantity),
+    is_meal: item?.is_meal ?? false,
+    remarks: item?.remarks ?? '',
   }));
-  if (normalized.some((item) => !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 65535)) {
+  if (normalized.some((item) =>
+    !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 65535
+  )) {
     throw new HttpError(400, 'Quantities must be whole numbers of at least 1.');
+  }
+  if (normalized.some((item) =>
+    typeof item.is_meal !== 'boolean' ||
+    typeof item.remarks !== 'string' ||
+    item.remarks.length > 500
+  )) {
+    throw new HttpError(400, 'Each item needs a valid meal selection and remarks of at most 500 characters.');
   }
   const orderDetails = {
     order_type: details.order_type,
@@ -1117,7 +1351,19 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
     delivery_address: String(details.delivery_address ?? '').trim().slice(0, 500),
     table_no: String(details.table_no ?? '').trim().slice(0, 20),
     notes: String(details.notes ?? '').trim().slice(0, 500),
+    discount_type: details.discount_type ?? 'amount',
+    discount_value: Number(details.discount_value ?? 0),
   };
+  if (!['amount', 'percentage'].includes(orderDetails.discount_type)) {
+    throw new HttpError(400, 'Choose a valid discount type.');
+  }
+  if (
+    !Number.isFinite(orderDetails.discount_value) ||
+    orderDetails.discount_value < 0 ||
+    (orderDetails.discount_type === 'percentage' && orderDetails.discount_value > 100)
+  ) {
+    throw new HttpError(400, 'Enter a valid discount value.');
+  }
   if (orderDetails.order_type === 'dine_in' && !orderDetails.table_no) {
     throw new HttpError(400, 'Enter a table number for dine-in orders.');
   }
@@ -1152,7 +1398,7 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
     }
     await rows(
       `UPDATE orders SET order_type = ?, customer_name = ?, customer_phone = ?,
-             delivery_address = ?, table_no = ?, notes = ?
+             delivery_address = ?, table_no = ?, notes = ?, discount_type = ?, discount_value = ?
         WHERE id = ?`,
       [
         orderDetails.order_type,
@@ -1161,15 +1407,33 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
         orderDetails.delivery_address,
         orderDetails.table_no,
         orderDetails.notes,
+        orderDetails.discount_type,
+        orderDetails.discount_value,
         id,
       ],
       connection,
     );
+    if (orderDetails.customer_phone && orderDetails.customer_name) {
+      await rows(
+        `INSERT INTO customer_master (contact_number, full_name, address)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           full_name = VALUES(full_name),
+           address = COALESCE(VALUES(address), address)`,
+        [
+          orderDetails.customer_phone,
+          orderDetails.customer_name,
+          orderDetails.delivery_address || null,
+        ],
+        connection,
+      );
+    }
 
     if (normalized.length) {
       const menuIds = normalized.map((item) => item.menu_item_id);
       const menuRows = await rows(
-        `SELECT mi.id, mi.name, mi.price, mi.prep_time_minutes, mi.is_available
+        `SELECT mi.id, mi.name, mi.price, mi.meal_available, mi.meal_price,
+                mi.prep_time_minutes, mi.is_available
            FROM menu_items mi
            JOIN categories c ON c.id = mi.category_id AND c.is_active = 1
           WHERE mi.is_active = 1 AND mi.id IN (${menuIds.map(() => '?').join(',')})`,
@@ -1179,8 +1443,12 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
       const menuById = new Map(menuRows.map((menu) => [number(menu.id), menu]));
       if (menuById.size !== new Set(menuIds).size) throw new HttpError(400, 'An item on this order no longer exists.');
       for (const item of normalized) {
-        if (!menuById.get(item.menu_item_id).is_available) {
-          throw new HttpError(409, `${menuById.get(item.menu_item_id).name} is sold out.`);
+        const menuItem = menuById.get(item.menu_item_id);
+        if (!menuItem.is_available) {
+          throw new HttpError(409, `${menuItem.name} is sold out.`);
+        }
+        if (item.is_meal && !menuItem.meal_available) {
+          throw new HttpError(400, `${menuItem.name} cannot be made a meal.`);
         }
       }
       const minutes = Math.max(...normalized.map((item) => number(menuById.get(item.menu_item_id).prep_time_minutes)));
@@ -1203,15 +1471,31 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
         const menu = menuById.get(item.menu_item_id);
         await rows(
           `INSERT INTO order_items
-             (order_id, round_id, menu_item_id, item_name, unit_price, prep_time_minutes, quantity)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [id, newRoundId, item.menu_item_id, menu.name, menu.price, menu.prep_time_minutes, item.quantity],
+             (order_id, round_id, menu_item_id, item_name, unit_price, prep_time_minutes,
+              quantity, is_meal, remarks)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            id,
+            newRoundId,
+            item.menu_item_id,
+            menu.name,
+            number(menu.price) + (item.is_meal ? number(menu.meal_price) : 0),
+            menu.prep_time_minutes,
+            item.quantity,
+            item.is_meal ? 1 : 0,
+            item.remarks.trim(),
+          ],
           connection,
         );
       }
       await logActivity(id, req.user.id, 'round_saved', {
         round_no: roundNo,
-        items: normalized.map((item) => ({ name: menuById.get(item.menu_item_id).name, qty: item.quantity })),
+        items: normalized.map((item) => ({
+          name: menuById.get(item.menu_item_id).name,
+          qty: item.quantity,
+          is_meal: item.is_meal,
+          remarks: item.remarks.trim(),
+        })),
         estimated_minutes: minutes,
       }, connection);
     } else {
@@ -1230,7 +1514,7 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
       connection,
     );
     const subtotal = number(totals.subtotal);
-    const discount = number(order.discount);
+    const discount = discountAmount(subtotal, orderDetails.discount_type, orderDetails.discount_value);
     const deliveryFee = number(order.delivery_fee);
     const taxPercent = Number(taxConfig?.value ?? 0);
     if (!Number.isFinite(taxPercent) || taxPercent < 0) throw new Error('Invalid setting.tax_percent in app_config.');
@@ -1238,10 +1522,10 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
     const tax = Math.round(taxable * taxPercent) / 100;
     const total = Math.round((taxable + tax + deliveryFee) * 100) / 100;
     await rows(
-      `UPDATE orders SET status = ?, subtotal = ?, tax = ?, total = ?,
+      `UPDATE orders SET status = ?, subtotal = ?, discount = ?, tax = ?, total = ?,
              locked_by = NULL, locked_at = NULL, lock_expires_at = NULL
         WHERE id = ?`,
-      [newRoundId ? 'in_progress' : order.status, subtotal, tax, total, id],
+      [newRoundId ? 'in_progress' : order.status, subtotal, discount, tax, total, id],
       connection,
     );
   });
@@ -1263,7 +1547,7 @@ app.delete('/api/orders/:id/items/:itemId', requireAuth, route(async (req, res) 
     assertOrderLock(order, req.user);
     if (!isOpenStatus(order.status)) throw new HttpError(409, 'This order is already closed.');
     const [item] = await rows(
-      `SELECT oi.id, oi.round_id, oi.item_name, oi.quantity, oi.line_total,
+      `SELECT oi.id, oi.round_id, oi.item_name, oi.quantity, oi.line_total, oi.served_at,
               r.round_no, r.status AS round_status
          FROM order_items oi
          JOIN order_rounds r ON r.id = oi.round_id
@@ -1273,8 +1557,8 @@ app.delete('/api/orders/:id/items/:itemId', requireAuth, route(async (req, res) 
       connection,
     );
     if (!item) throw new HttpError(404, 'Saved order item not found.');
-    if (item.round_status === 'served') {
-      throw new HttpError(409, 'Items from a served round cannot be removed.');
+    if (item.round_status === 'served' || item.served_at !== null) {
+      throw new HttpError(409, 'Served items cannot be removed.');
     }
     await rows(
       'UPDATE order_items SET voided_at = UTC_TIMESTAMP() WHERE id = ? AND order_id = ?',
@@ -1308,7 +1592,7 @@ app.delete('/api/orders/:id/items/:itemId', requireAuth, route(async (req, res) 
       connection,
     );
     const subtotal = number(subtotalResult.subtotal);
-    const discount = number(order.discount);
+    const discount = discountAmount(subtotal, order.discount_type ?? 'amount', order.discount_value ?? order.discount);
     const deliveryFee = number(order.delivery_fee);
     const taxPercent = Number(taxConfig?.value ?? 0);
     if (!Number.isFinite(taxPercent) || taxPercent < 0) {
@@ -1318,9 +1602,9 @@ app.delete('/api/orders/:id/items/:itemId', requireAuth, route(async (req, res) 
     const tax = Math.round(taxable * taxPercent) / 100;
     const total = Math.round((taxable + tax + deliveryFee) * 100) / 100;
     await rows(
-      `UPDATE orders SET subtotal = ?, tax = ?, total = ?, updated_at = UTC_TIMESTAMP()
+      `UPDATE orders SET subtotal = ?, discount = ?, tax = ?, total = ?, updated_at = UTC_TIMESTAMP()
         WHERE id = ?`,
-      [subtotal, tax, total, orderId],
+      [subtotal, discount, tax, total, orderId],
       connection,
     );
     await logActivity(orderId, req.user.id, 'order_item_removed', {
@@ -1411,7 +1695,7 @@ app.post('/api/orders/:id/cancel', requireAuth, route(async (req, res) => {
   res.json(await getOrder(id));
 }));
 
-app.post('/api/orders/:id/serve', requireAuth, requireAdmin, route(async (req, res) => {
+app.post('/api/orders/:id/serve', requireAuth, requireFeature('kitchen'), route(async (req, res) => {
   const id = parseId(req.params.id);
   await transaction(async (connection) => {
     const [order] = await rows('SELECT id FROM orders WHERE id = ? FOR UPDATE', [id], connection);
@@ -1423,6 +1707,7 @@ app.post('/api/orders/:id/serve', requireAuth, requireAdmin, route(async (req, r
             SELECT 1 FROM order_items
              WHERE order_items.round_id = order_rounds.id
                AND order_items.voided_at IS NULL
+               AND order_items.served_at IS NULL
           )`,
       [id],
       connection,
@@ -1435,6 +1720,15 @@ app.post('/api/orders/:id/serve', requireAuth, requireAdmin, route(async (req, r
         overdue_minutes: Math.floor((now - new Date(dateIso(round.estimated_ready_at)).getTime()) / 60_000),
       }))
       .filter((round) => round.overdue_minutes > 5);
+    await rows(
+      `UPDATE order_items
+          JOIN order_rounds ON order_rounds.id = order_items.round_id
+           SET order_items.served_at = UTC_TIMESTAMP()
+         WHERE order_rounds.order_id = ? AND order_rounds.status = 'preparing'
+           AND order_items.voided_at IS NULL AND order_items.served_at IS NULL`,
+      [id],
+      connection,
+    );
     await rows(
       `UPDATE order_rounds SET status = 'served', ready_at = UTC_TIMESTAMP()
         WHERE order_id = ? AND status = 'preparing'
@@ -1451,6 +1745,64 @@ app.post('/api/orders/:id/serve', requireAuth, requireAdmin, route(async (req, r
       round_nos: activeRounds.map((round) => number(round.round_no)),
     }, connection);
     if (overdue.length) await logActivity(id, req.user.id, 'kitchen_overdue', { rounds: overdue }, connection);
+  });
+  emitOrderEvent('order:updated');
+  res.json(await getOrder(id));
+}));
+
+app.post('/api/orders/:id/items/:itemId/serve', requireAuth, requireFeature('kitchen'), route(async (req, res) => {
+  const id = parseId(req.params.id);
+  const itemId = parseId(req.params.itemId, 'item id');
+  await transaction(async (connection) => {
+    const [order] = await rows('SELECT id FROM orders WHERE id = ? FOR UPDATE', [id], connection);
+    if (!order) throw new HttpError(404, 'Order not found.');
+    const [item] = await rows(
+      `SELECT oi.id, oi.item_name, oi.served_at, r.id AS round_id, r.round_no,
+              r.status AS round_status, r.estimated_ready_at
+         FROM order_items oi
+         JOIN order_rounds r ON r.id = oi.round_id
+        WHERE oi.id = ? AND oi.order_id = ? AND oi.voided_at IS NULL
+        FOR UPDATE`,
+      [itemId, id],
+      connection,
+    );
+    if (!item) throw new HttpError(404, 'Order item not found.');
+    if (item.round_status !== 'preparing' || item.served_at !== null) {
+      throw new HttpError(409, 'This item is no longer being prepared.');
+    }
+
+    await rows(
+      'UPDATE order_items SET served_at = UTC_TIMESTAMP() WHERE id = ?',
+      [itemId],
+      connection,
+    );
+    const [remaining] = await rows(
+      `SELECT COUNT(*) AS total FROM order_items
+        WHERE round_id = ? AND voided_at IS NULL AND served_at IS NULL`,
+      [item.round_id],
+      connection,
+    );
+    if (number(remaining.total) === 0) {
+      await rows(
+        `UPDATE order_rounds SET status = 'served', ready_at = UTC_TIMESTAMP()
+          WHERE id = ? AND status = 'preparing'`,
+        [item.round_id],
+        connection,
+      );
+    }
+    await rows('UPDATE orders SET updated_at = UTC_TIMESTAMP() WHERE id = ?', [id], connection);
+    await logActivity(id, req.user.id, 'item_served', {
+      round_no: number(item.round_no),
+      item_name: item.item_name,
+    }, connection);
+    const overdueMinutes = Math.floor(
+      (Date.now() - new Date(dateIso(item.estimated_ready_at)).getTime()) / 60_000,
+    );
+    if (overdueMinutes > 5) {
+      await logActivity(id, req.user.id, 'kitchen_overdue', {
+        rounds: [{ round_no: number(item.round_no), overdue_minutes: overdueMinutes }],
+      }, connection);
+    }
   });
   emitOrderEvent('order:updated');
   res.json(await getOrder(id));

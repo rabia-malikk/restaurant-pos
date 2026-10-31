@@ -16,13 +16,25 @@ The `.env` file is local and ignored by Git. Set `DB_PASSWORD` there to the pass
 your `hawt_pos` application database user. Do not put database credentials in a `VITE_`
 variable; Vite exposes those values to browser code.
 
-Before starting the API, run
-[`server/migrations/001_inventory.sql`](./server/migrations/001_inventory.sql) once against
-`hawt_pos` using the database migration account. If you have not created an admin account,
-run `npm run create-admin` in an interactive terminal. Then run `npm run api` and `npm run dev`
-in separate terminals. If you forget the password, run `npm run reset-admin-password` to set
-a new one without displaying it; active sessions for that admin will be revoked. Check the
-connection at `http://localhost:3000/api/health`.
+Before starting the API, run [`server/schema.sql`](./server/schema.sql) once using a MySQL
+account that can create databases and tables. It creates `hawt_pos`, all application tables,
+and the initial configuration values. Separately create/grant the application database account
+configured by `DB_USER` in `.env`; the schema script does not create database users. If you
+already have a database, apply [`server/migrations/002_order_discounts.sql`](./server/migrations/002_order_discounts.sql)
+and [`server/migrations/003_item_served.sql`](./server/migrations/003_item_served.sql)
+and [`server/migrations/004_meal_options_and_item_remarks.sql`](./server/migrations/004_meal_options_and_item_remarks.sql)
+and [`server/migrations/005_customer_master.sql`](./server/migrations/005_customer_master.sql)
+and [`server/migrations/006_user_feature_permissions.sql`](./server/migrations/006_user_feature_permissions.sql)
+once to add persisted discount, per-item served, meal pricing, item remarks, customer master data,
+and per-user feature permissions. Admins can assign Orders, Menu, and Kitchen to individual staff
+users. Staff see only their own orders in Orders, while Kitchen remains a shared queue.
+On first app load, the browser checks for an admin account and presents a one-time setup page if
+none exists. The setup endpoint also checks for an existing admin under a database lock so
+concurrent requests cannot create multiple first admins. You can alternatively run
+`npm run create-admin` in an interactive terminal.
+Then run `npm run api` and `npm run dev` in separate terminals. If you forget the password,
+run `npm run reset-admin-password` to set a new one without displaying it; active sessions
+for that admin will be revoked. Check the connection at `http://localhost:3000/api/health`.
 
 ## What is built
 
@@ -36,7 +48,8 @@ connection at `http://localhost:3000/api/health`.
   force-unlock.
 - **Admin**: dashboard (sales, orders, average order, by hour, by staff, payment methods, order
   types, top items), all-orders grid with Resume / Force unlock, activity log drawer, menu
-  availability toggles, and user create/edit/delete with an active-user limit.
+  availability and meal add-on pricing, and user create/edit/delete with an active-user limit.
+  POS order items support per-unit meal selection and saved kitchen remarks.
 
 ## Structure
 
@@ -68,6 +81,8 @@ The API implements these endpoints:
 
 | Method | Path | Notes |
 |---|---|---|
+| GET | `/auth/setup-status` | public; returns `{adminExists}` |
+| POST | `/auth/setup-admin` | public, one-time bootstrap; body `{username, name, password}`; creates the first admin only |
 | POST | `/auth/login` | body `{username, password, replace_session?}` returns `{user}`; when another active session exists, returns 409 with code `SESSION_EXISTS` unless `replace_session: true` |
 | POST | `/auth/logout` | |
 | GET | `/auth/me` | returns `{user}` or 401 |
@@ -83,6 +98,8 @@ The API implements these endpoints:
 | PUT | `/inventory/production-plan` | admin, body `{items:[{menu_item_id, quantity}]}`; manually saves tentative production quantities |
 | GET | `/orders` | resumable orders. Staff: own. Admin: all. Hide orders locked by others |
 | GET | `/orders/all` | admin, all statuses |
+| GET | `/customers?contact_number=...` | authenticated, looks up a customer by contact number |
+| GET | `/orders/:id/receipt` | admin, paid order details and payment records for printing a receipt |
 | POST | `/orders` | body `{order_type}`, returns a draft locked to the caller |
 | GET | `/orders/:id` | |
 | POST | `/orders/:id/open` | takes the lock, 409 if held by someone else |
@@ -93,6 +110,7 @@ The API implements these endpoints:
 | POST | `/orders/:id/checkout` | body `{payments:[{method, amount, reference?}]}` |
 | POST | `/orders/:id/cancel` | |
 | POST | `/orders/:id/serve` | admin, marks all preparing rounds as served; logs rounds more than 5 minutes overdue |
+| POST | `/orders/:id/items/:itemId/serve` | admin, marks one preparing item as served; completes its round when all items are served |
 | POST | `/orders/:id/force-unlock` | admin |
 | GET | `/orders/:id/activity` | admin only |
 | GET | `/reports/dashboard?range=today|7d|30d` | admin, shape in `src/types` (`DashboardData`) |

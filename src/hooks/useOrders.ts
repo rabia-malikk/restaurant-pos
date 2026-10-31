@@ -5,6 +5,6 @@ import { ordersApi } from '@/api/orders';
 export const useOpenOrders = () =>
   useQuery({ queryKey: ['orders', 'open'], queryFn: ordersApi.list, refetchInterval: 15_000 });
 
-/** Admin: every order in every status. */
+/** Users with Orders access: all orders for admins, own orders for staff. */
 export const useAllOrders = () =>
   useQuery({ queryKey: ['orders', 'all'], queryFn: ordersApi.listAll, refetchInterval: 30_000 });

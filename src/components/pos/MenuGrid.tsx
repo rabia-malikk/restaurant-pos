@@ -49,7 +49,7 @@ export default function MenuGrid() {
 
       <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
         {items.map((item) => {
-          const qty = cart[item.id] ?? 0;
+          const qty = cart.filter((line) => line.menu_item_id === item.id).length;
           return (
             <Paper
               key={item.id}
@@ -77,6 +77,11 @@ export default function MenuGrid() {
                 <Typography fontWeight={600} color="primary.main">
                   {formatMoney(item.price)}
                 </Typography>
+                {item.meal_available && (
+                  <Typography variant="caption" color="text.secondary">
+                    Meal +{formatMoney(item.meal_price)}
+                  </Typography>
+                )}
                 <Typography
                   variant="body2"
                   color="text.secondary"

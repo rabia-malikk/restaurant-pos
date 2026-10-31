@@ -10,6 +10,7 @@ const ACTION_LABEL: Record<string, string> = {
   order_released: 'Order closed on screen',
   round_saved: 'Round saved',
   round_served: 'Order marked served',
+  item_served: 'Item marked served',
   kitchen_overdue: 'Kitchen order overdue by more than 5 minutes',
   draft_saved: 'Details saved',
   checkout: 'Paid',
@@ -70,6 +71,7 @@ export default function ActivityLogDrawer({ orderId, onClose }: { orderId: numbe
 function summarise(details: Record<string, unknown>): string {
   const parts: string[] = [];
   if (typeof details.round_no === 'number') parts.push(`Round ${details.round_no}`);
+  if (typeof details.item_name === 'string') parts.push(details.item_name);
   if (Array.isArray(details.round_nos)) parts.push(`Rounds ${(details.round_nos as number[]).join(', ')}`);
   if (Array.isArray(details.rounds)) {
     parts.push(

@@ -1,10 +1,12 @@
 // Shared types. They mirror the MySQL schema in the design doc.
 
 export type Role = 'admin' | 'staff';
+export type UserFeature = 'orders' | 'menu' | 'kitchen';
 export type OrderType = 'dine_in' | 'takeaway' | 'delivery';
 export type OrderStatus = 'draft' | 'in_progress' | 'checked_out' | 'cancelled';
 export type PaymentMethod = 'cash' | 'card' | 'online' | 'other';
 export type RoundStatus = 'preparing' | 'ready' | 'served';
+export type DiscountType = 'amount' | 'percentage';
 
 export interface User {
   id: number;
@@ -12,6 +14,7 @@ export interface User {
   username: string;
   role: Role;
   is_active: boolean;
+  features: UserFeature[];
 }
 
 export interface UserCapacity {
@@ -29,6 +32,7 @@ export interface CreateUserPayload {
   password: string;
   role: Role;
   is_active: boolean;
+  features: UserFeature[];
 }
 
 export interface UpdateUserPayload extends Partial<Omit<CreateUserPayload, 'password'>> {
@@ -49,6 +53,8 @@ export interface MenuItem {
   description?: string;
   image_url?: string;
   price: number;
+  meal_available: boolean;
+  meal_price: number;
   prep_time_minutes: number;
   is_available: boolean;
 }
@@ -58,6 +64,8 @@ export interface CreateMenuItemPayload {
   name: string;
   description?: string;
   price: number;
+  meal_available: boolean;
+  meal_price: number;
   prep_time_minutes: number;
   image?: File;
 }
@@ -107,6 +115,9 @@ export interface OrderItem {
   prep_time_minutes: number;
   quantity: number;
   line_total: number;
+  is_meal: boolean;
+  remarks: string | null;
+  served_at: string | null;
 }
 
 /** One saved iteration of an order ("Round 1", "Round 2", ...). */
@@ -130,6 +141,11 @@ export interface OrderDetails {
   notes: string;
 }
 
+export interface CustomerMasterRecord {
+  contact_number: string;
+  full_name: string;
+}
+
 export interface Order extends OrderDetails {
   id: number;
   order_no: string;
@@ -142,6 +158,8 @@ export interface Order extends OrderDetails {
   rounds: OrderRound[];
   subtotal: number;
   discount: number;
+  discount_type: DiscountType;
+  discount_value: number;
   tax: number;
   delivery_fee: number;
   total: number;
@@ -150,9 +168,22 @@ export interface Order extends OrderDetails {
   checked_out_at: string | null;
 }
 
+export interface ReceiptPayment {
+  method: PaymentMethod;
+  amount: number;
+  reference: string | null;
+}
+
+export interface OrderReceipt {
+  order: Order;
+  payments: ReceiptPayment[];
+}
+
 export interface SaveOrderPayload extends OrderDetails {
   /** The unsaved cart. Becomes the next round. May be empty to save only the details. */
-  items: { menu_item_id: number; quantity: number }[];
+  items: { menu_item_id: number; quantity: number; is_meal: boolean; remarks: string }[];
+  discount_type: DiscountType;
+  discount_value: number;
 }
 
 export interface SaveOrderResult {
