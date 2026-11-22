@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Alert, Box, Divider, Typography } from '@mui/material';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Divider, TextField, Typography } from '@mui/material';
 import { ordersApi } from '@/api/orders';
+import { shiftsApi } from '@/api/shifts';
 import { useMenu } from '@/hooks/useMenu';
 import { useOpenOrders } from '@/hooks/useOrders';
 import { useOrderLock } from '@/hooks/useOrderLock';
@@ -41,10 +42,21 @@ export default function PosPage() {
   const menuQuery = useMenu();
   const { data: menu } = menuQuery;
   const { data: openOrders = [], isLoading } = useOpenOrders();
+  const shiftQueryKey = ['shifts', 'me', user?.id] as const;
+  const { data: shiftStatus } = useQuery({
+    queryKey: shiftQueryKey,
+    queryFn: shiftsApi.current,
+    enabled: Boolean(user),
+    refetchInterval: 30_000,
+  });
+  const shiftActive = Boolean(shiftStatus?.active_shift);
 
   const [payOpen, setPayOpen] = useState(false);
   const [savedRound, setSavedRound] = useState<{ order: Order; round: OrderRound } | null>(null);
   const [receipt, setReceipt] = useState<OrderReceipt | null>(null);
+  const [cancelOrderId, setCancelOrderId] = useState<number | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
+  const handledResumeId = useRef<number | null>(null);
 
   const refreshOrders = () => queryClient.invalidateQueries({ queryKey: ['orders'] });
 
@@ -117,10 +129,12 @@ export default function PosPage() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: (id: number) => ordersApi.cancel(id),
+    mutationFn: (input: { id: number; reason?: string }) => ordersApi.cancel(input.id, input.reason),
     onSuccess: (cancelled) => {
       if (usePosStore.getState().order?.id === cancelled.id) reset();
       refreshOrders();
+      setCancelOrderId(null);
+      setCancelReason('');
       notify('Order cancelled.', 'success');
     },
     onError: (error) => notify(errorMessage(error), 'error'),
@@ -181,8 +195,22 @@ export default function PosPage() {
   };
 
   const handleCancel = (id: number) => {
-    if (!window.confirm('Cancel this order? This cannot be undone.')) return;
-    cancelMutation.mutate(id);
+    if (user?.role === 'admin') {
+      if (!window.confirm('Cancel this order? This cannot be undone.')) return;
+      cancelMutation.mutate({ id });
+      return;
+    }
+    setCancelReason('');
+    setCancelOrderId(id);
+  };
+
+  const submitCancellation = () => {
+    const reason = cancelReason.trim();
+    if (!reason) {
+      notify('Enter a reason for cancelling this order.', 'warning');
+      return;
+    }
+    cancelMutation.mutate({ id: cancelOrderId!, reason });
   };
 
   const handleRemoveSavedItem = (itemId: number, itemName: string) => {
@@ -200,12 +228,16 @@ export default function PosPage() {
   // Resume from the Orders page arrives here with the order id in router state.
   useEffect(() => {
     const id = (location.state as { resumeOrderId?: number } | null)?.resumeOrderId;
-    if (id) {
+    if (!id) {
+      handledResumeId.current = null;
+      return;
+    }
+    if (id && shiftActive && handledResumeId.current !== id) {
+      handledResumeId.current = id;
       window.history.replaceState({}, '');
       openMutation.mutate(id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [location.state, openMutation, shiftActive]);
 
   // Release the order when leaving the POS screen.
   useEffect(
@@ -228,83 +260,160 @@ export default function PosPage() {
   }, [cart]);
 
   return (
-    <Box
-      sx={{
-        height: { md: '100%' },
-        display: 'grid',
-        gridTemplateColumns: { xs: '1fr', md: '280px 1fr 340px', lg: '300px 1fr 380px' },
-        bgcolor: 'divider',
-        gap: '1px', // hairline dividers between panels
-      }}
-    >
-      <Box sx={{ ...panelSx, overflow: 'hidden', maxHeight: { xs: 360, md: 'none' } }}>
-        <DraftsPanel
-          orders={openOrders}
-          loading={isLoading}
-          activeId={order?.id ?? null}
-          isAdmin={user?.role === 'admin'}
-          busy={busy}
-          onResume={resume}
-          onNew={startNew}
-          onCancel={handleCancel}
-        />
-      </Box>
+    <Box sx={{ position: 'relative', height: { md: '100%' }, minHeight: 360 }}>
+      <fieldset
+        disabled={!shiftActive}
+        aria-disabled={!shiftActive}
+        style={{
+          border: 0,
+          margin: 0,
+          padding: 0,
+          minWidth: 0,
+          height: '100%',
+          opacity: shiftActive ? 1 : 0.45,
+          pointerEvents: shiftActive ? 'auto' : 'none',
+        }}
+      >
+        <Box
+          sx={{
+            height: { md: '100%' },
+            display: 'grid',
+            gridTemplateColumns: { xs: '1fr', md: '280px 1fr 340px', lg: '300px 1fr 380px' },
+            bgcolor: 'divider',
+            gap: '1px',
+          }}
+        >
+          <Box sx={{ ...panelSx, overflow: 'hidden', maxHeight: { xs: 360, md: 'none' } }}>
+            <DraftsPanel
+              orders={openOrders}
+              loading={isLoading}
+              activeId={order?.id ?? null}
+              isAdmin={user?.role === 'admin'}
+              busy={busy}
+              onResume={resume}
+              onNew={startNew}
+              onCancel={handleCancel}
+            />
+          </Box>
 
-      <Box sx={{ ...panelSx, bgcolor: 'background.default' }}>
-        {order ? (
-          <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <Box>
-              <Typography variant="h6" gutterBottom>
-                {orderTitle(details)}
-              </Typography>
-              <OrderTypeToggle value={details.order_type} onChange={(order_type) => setDetails({ order_type })} />
-            </Box>
-            <CustomerFields />
-            <Divider />
-            {menuQuery.isError ? (
-              <Alert severity="error">{errorMessage(menuQuery.error)}</Alert>
+          <Box sx={{ ...panelSx, bgcolor: 'background.default' }}>
+            {order ? (
+              <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <Box>
+                  <Typography variant="h6" gutterBottom>
+                    {orderTitle(details)}
+                  </Typography>
+                  <OrderTypeToggle value={details.order_type} onChange={(order_type) => setDetails({ order_type })} />
+                </Box>
+                <CustomerFields />
+                <Divider />
+                {menuQuery.isError ? (
+                  <Alert severity="error">{errorMessage(menuQuery.error)}</Alert>
+                ) : (
+                  <MenuGrid />
+                )}
+              </Box>
             ) : (
-              <MenuGrid />
+              <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 4, textAlign: 'center' }}>
+                <Box>
+                  <Typography variant="h5" gutterBottom>
+                    No order open
+                  </Typography>
+                  <Typography color="text.secondary">
+                    Pick an order from the list to resume it, or start a new one.
+                  </Typography>
+                </Box>
+              </Box>
             )}
           </Box>
-        ) : (
-          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 4, textAlign: 'center' }}>
-            <Box>
-              <Typography variant="h5" gutterBottom>
-                No order open
-              </Typography>
-              <Typography color="text.secondary">
-                Pick an order from the list to resume it, or start a new one.
-              </Typography>
-            </Box>
+
+          <Box sx={{ ...panelSx, overflow: 'hidden', maxHeight: { xs: 560, md: 'none' } }}>
+            <OrderSummary
+              saving={saveMutation.isPending || cancelMutation.isPending || removeSavedItemMutation.isPending}
+              onSave={handleSave}
+              onCheckout={handleCheckout}
+              onCancel={() => handleCancel(order!.id)}
+              onRemoveSavedItem={handleRemoveSavedItem}
+              removingSavedItem={removeSavedItemMutation.isPending}
+            />
           </Box>
-        )}
-      </Box>
+        </Box>
+      </fieldset>
 
-      <Box sx={{ ...panelSx, overflow: 'hidden', maxHeight: { xs: 560, md: 'none' } }}>
-        <OrderSummary
-          saving={saveMutation.isPending || cancelMutation.isPending || removeSavedItemMutation.isPending}
-          onSave={handleSave}
-          onCheckout={handleCheckout}
-          onCancel={() => handleCancel(order!.id)}
-          onRemoveSavedItem={handleRemoveSavedItem}
-          removingSavedItem={removeSavedItemMutation.isPending}
-        />
-      </Box>
+      {!shiftActive && (
+        <Alert
+          severity="info"
+          sx={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: 'min(90%, 480px)',
+            boxShadow: 3,
+          }}
+        >
+          Order taking is disabled until you start your shift using the button in the header.
+        </Alert>
+      )}
 
-      <PaymentDialog
-        open={payOpen}
-        total={totals.total}
-        loading={checkoutMutation.isPending}
-        onClose={() => setPayOpen(false)}
-        onConfirm={(method, reference) => checkoutMutation.mutate({ method, reference })}
-      />
-      <SavedRoundDialog
-        order={savedRound?.order ?? null}
-        round={savedRound?.round ?? null}
-        onClose={() => setSavedRound(null)}
-      />
-      <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />
+      {shiftActive && (
+        <>
+          <Dialog
+            open={cancelOrderId !== null}
+            onClose={() => {
+              if (!cancelMutation.isPending) setCancelOrderId(null);
+            }}
+            fullWidth
+            maxWidth="sm"
+            aria-labelledby="cancel-order-title"
+          >
+            <DialogTitle id="cancel-order-title">Reason for cancelling order</DialogTitle>
+            <DialogContent>
+              <Typography color="text.secondary" sx={{ mb: 2 }}>
+                Enter a reason to keep with the order record. This cannot be undone.
+              </Typography>
+              <TextField
+                autoFocus
+                fullWidth
+                multiline
+                minRows={3}
+                label="Cancellation reason"
+                value={cancelReason}
+                onChange={(event) => setCancelReason(event.target.value.slice(0, 500))}
+                inputProps={{ maxLength: 500 }}
+                helperText={`${cancelReason.length}/500`}
+                disabled={cancelMutation.isPending}
+              />
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setCancelOrderId(null)} disabled={cancelMutation.isPending}>
+                Keep order
+              </Button>
+              <Button
+                color="error"
+                variant="contained"
+                onClick={submitCancellation}
+                disabled={!cancelReason.trim() || cancelMutation.isPending}
+              >
+                {cancelMutation.isPending ? 'Cancelling…' : 'Cancel order'}
+              </Button>
+            </DialogActions>
+          </Dialog>
+          <PaymentDialog
+            open={payOpen}
+            total={totals.total}
+            loading={checkoutMutation.isPending}
+            onClose={() => setPayOpen(false)}
+            onConfirm={(method, reference) => checkoutMutation.mutate({ method, reference })}
+          />
+          <SavedRoundDialog
+            order={savedRound?.order ?? null}
+            round={savedRound?.round ?? null}
+            onClose={() => setSavedRound(null)}
+          />
+          <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />
+        </>
+      )}
     </Box>
   );
 }

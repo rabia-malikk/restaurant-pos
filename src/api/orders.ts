@@ -55,8 +55,8 @@ export const ordersApi = {
   checkout: (id: number, payload: CheckoutPayload): Promise<Order> =>
     data(http.post<Order>(`/orders/${id}/checkout`, payload)),
 
-  cancel: (id: number): Promise<Order> =>
-    data(http.post<Order>(`/orders/${id}/cancel`)),
+  cancel: (id: number, reason?: string): Promise<Order> =>
+    data(http.post<Order>(`/orders/${id}/cancel`, reason === undefined ? {} : { reason })),
 
   /** Kitchen access. Marks all preparing rounds on the order as served. */
   markServed: (id: number): Promise<Order> =>

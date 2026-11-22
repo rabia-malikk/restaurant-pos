@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { DataGrid, type GridColDef } from '@mui/x-data-grid';
-import { Box, Button, Chip, Typography } from '@mui/material';
+import { Box, Button, Chip, Tooltip, Typography } from '@mui/material';
 import { ordersApi } from '@/api/orders';
+import { shiftsApi } from '@/api/shifts';
 import ActivityLogDrawer from '@/components/admin/ActivityLogDrawer';
 import ReceiptDialog from '@/components/pos/ReceiptDialog';
 import { useNotify } from '@/context/NotifyContext';
@@ -21,6 +22,13 @@ export default function OrdersPage() {
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const isAdmin = user?.role === 'admin';
+  const { data: shiftStatus } = useQuery({
+    queryKey: ['shifts', 'me', user?.id],
+    queryFn: shiftsApi.current,
+    enabled: Boolean(user),
+    refetchInterval: 30_000,
+  });
+  const shiftActive = Boolean(shiftStatus?.active_shift);
   const notify = useNotify();
   const queryClient = useQueryClient();
   const { data = [], isLoading } = useAllOrders();
@@ -64,7 +72,13 @@ export default function OrdersPage() {
       width: 190,
       renderCell: ({ row }) => (
         <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', height: '100%' }}>
-          <Chip size="small" label={STATUS_LABEL[row.status]} />
+          {row.status === 'cancelled' && row.cancellation_reason ? (
+            <Tooltip title={`Cancellation reason: ${row.cancellation_reason}`}>
+              <Chip size="small" label={STATUS_LABEL[row.status]} />
+            </Tooltip>
+          ) : (
+            <Chip size="small" label={STATUS_LABEL[row.status]} />
+          )}
           {isOpen(row) && isLocked(row) && (
             <Chip size="small" color="secondary" label={`Open: ${row.locked_by_name}`} />
           )}
@@ -105,7 +119,13 @@ export default function OrdersPage() {
             </Button>
           )}
           {isOpen(row) && !isLocked(row) && (
-            <Button size="small" variant="contained" onClick={() => navigate('/pos', { state: { resumeOrderId: row.id } })}>
+            <Button
+              size="small"
+              variant="contained"
+              disabled={!shiftActive}
+              title={shiftActive ? undefined : 'Start your shift before resuming orders.'}
+              onClick={() => navigate('/pos', { state: { resumeOrderId: row.id } })}
+            >
               Resume
             </Button>
           )}

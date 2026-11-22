@@ -13,6 +13,16 @@ const API_HOST = process.env.API_HOST ?? '127.0.0.1';
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const USER_FEATURES = new Set(['orders', 'menu', 'kitchen']);
+const SHIFT_TIMEZONE = process.env.SHIFT_TIMEZONE ?? 'Asia/Karachi';
+const shiftDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: SHIFT_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
 
 if (!process.env.DB_USER || !process.env.DB_PASSWORD || !process.env.DB_NAME) {
   throw new Error('Set DB_USER, DB_PASSWORD, and DB_NAME in the root .env file.');
@@ -39,6 +49,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new SocketServer(server, { serveClient: false });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES } });
+let shiftSweepTimer;
 
 class HttpError extends Error {
   constructor(status, message, code) {
@@ -81,6 +92,50 @@ function dateIso(value) {
 
 function number(value) {
   return Number(value ?? 0);
+}
+
+function zonedDateParts(date) {
+  return Object.fromEntries(
+    shiftDateFormatter.formatToParts(date)
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, Number(part.value)]),
+  );
+}
+
+function dateString({ year, month, day }) {
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function shiftBusinessDate(date = new Date()) {
+  const parts = zonedDateParts(date);
+  const businessDay = new Date(Date.UTC(parts.year, parts.month - 1, parts.day - (parts.hour < 5 ? 1 : 0)));
+  return dateString({
+    year: businessDay.getUTCFullYear(),
+    month: businessDay.getUTCMonth() + 1,
+    day: businessDay.getUTCDate(),
+  });
+}
+
+function shiftDateByDays(date, days) {
+  const [year, month, day] = date.split('-').map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return dateString({
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  });
+}
+
+function shiftBusinessStart(date) {
+  const [year, month, day] = date.split('-').map(Number);
+  const target = Date.UTC(year, month - 1, day, 5);
+  let timestamp = target;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = zonedDateParts(new Date(timestamp));
+    const represented = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    timestamp += target - represented;
+  }
+  return new Date(timestamp);
 }
 
 function discountAmount(subtotal, type, value) {
@@ -176,6 +231,44 @@ function requireFeature(feature) {
   };
 }
 
+async function closeExpiredShifts() {
+  await rows(
+    `UPDATE mst_shifts SET ended_at = UTC_TIMESTAMP(), ended_by = NULL, end_reason = 'auto'
+      WHERE ended_at IS NULL AND business_date < ?`,
+    [shiftBusinessDate()],
+  );
+}
+
+async function lockActiveShift(userId, shiftId, connection) {
+  const [shift] = await rows(
+    'SELECT id FROM mst_shifts WHERE id = ? AND user_id = ? AND ended_at IS NULL FOR UPDATE',
+    [shiftId, userId],
+    connection,
+  );
+  if (!shift) {
+    throw new HttpError(409, 'Your shift has ended. Start a new shift to take orders.', 'SHIFT_NOT_STARTED');
+  }
+}
+
+const requireActiveShift = route(async (req, _res, next) => {
+  await closeExpiredShifts();
+  const [shift] = await rows(
+    `SELECT id, business_date, started_at FROM mst_shifts
+      WHERE user_id = ? AND ended_at IS NULL
+      ORDER BY started_at DESC LIMIT 1`,
+    [req.user.id],
+  );
+  if (!shift) {
+    throw new HttpError(409, 'Start your shift before taking orders.', 'SHIFT_NOT_STARTED');
+  }
+  req.shift = {
+    id: number(shift.id),
+    business_date: String(shift.business_date).slice(0, 10),
+    started_at: dateIso(shift.started_at),
+  };
+  next();
+});
+
 function parseUserFeatures(value, label = 'features') {
   if (!Array.isArray(value) || value.some((feature) => typeof feature !== 'string' || !USER_FEATURES.has(feature))) {
     throw new HttpError(400, `${label} must contain only orders, menu, or kitchen.`);
@@ -262,6 +355,7 @@ function mapOrder(row, rounds) {
     created_at: dateIso(row.created_at),
     updated_at: dateIso(row.updated_at),
     checked_out_at: dateIso(row.checked_out_at),
+    cancellation_reason: row.cancellation_reason ?? null,
   };
 }
 
@@ -1154,6 +1248,84 @@ app.put('/api/inventory/production-plan', requireAuth, requireAdmin, route(async
   res.json(normalized);
 }));
 
+// Shifts
+app.get('/api/shifts/me', requireAuth, route(async (req, res) => {
+  await closeExpiredShifts();
+  const [shift] = await rows(
+    `SELECT id, business_date, started_at FROM mst_shifts
+      WHERE user_id = ? AND ended_at IS NULL
+      ORDER BY started_at DESC LIMIT 1`,
+    [req.user.id],
+  );
+  res.json({
+    business_date: shiftBusinessDate(),
+    timezone: SHIFT_TIMEZONE,
+    active_shift: shift
+      ? {
+        id: number(shift.id),
+        business_date: String(shift.business_date).slice(0, 10),
+        started_at: dateIso(shift.started_at),
+      }
+      : null,
+  });
+}));
+
+app.post('/api/shifts/start', requireAuth, route(async (req, res) => {
+  await closeExpiredShifts();
+  const date = shiftBusinessDate();
+  const shiftId = await transaction(async (connection) => {
+    await rows('SELECT id FROM users WHERE id = ? FOR UPDATE', [req.user.id], connection);
+    const [active] = await rows(
+      'SELECT id FROM mst_shifts WHERE user_id = ? AND ended_at IS NULL LIMIT 1 FOR UPDATE',
+      [req.user.id],
+      connection,
+    );
+    if (active) throw new HttpError(409, 'Your shift has already started.');
+    const result = await rows(
+      `INSERT INTO mst_shifts (user_id, business_date, started_at)
+       VALUES (?, ?, UTC_TIMESTAMP())`,
+      [req.user.id, date],
+      connection,
+    );
+    return number(result.insertId);
+  });
+  const [shift] = await rows(
+    'SELECT id, business_date, started_at FROM mst_shifts WHERE id = ?',
+    [shiftId],
+  );
+  res.status(201).json({
+    business_date: date,
+    timezone: SHIFT_TIMEZONE,
+    active_shift: {
+      id: number(shift.id),
+      business_date: String(shift.business_date).slice(0, 10),
+      started_at: dateIso(shift.started_at),
+    },
+  });
+}));
+
+app.post('/api/shifts/end', requireAuth, route(async (req, res) => {
+  await closeExpiredShifts();
+  const ended = await transaction(async (connection) => {
+    const result = req.user.role === 'admin'
+      ? await rows(
+        `UPDATE mst_shifts SET ended_at = UTC_TIMESTAMP(), ended_by = ?, end_reason = 'admin'
+          WHERE ended_at IS NULL`,
+        [req.user.id],
+        connection,
+      )
+      : await rows(
+        `UPDATE mst_shifts SET ended_at = UTC_TIMESTAMP(), ended_by = ?, end_reason = 'user'
+          WHERE user_id = ? AND ended_at IS NULL`,
+        [req.user.id, req.user.id],
+        connection,
+      );
+    if (!result.affectedRows) throw new HttpError(409, 'There is no active shift to end.');
+    return number(result.affectedRows);
+  });
+  res.json({ ended });
+}));
+
 // Order management
 app.get('/api/orders', requireAuth, route(async (req, res) => {
   const filter = req.user.role === 'admin' ? '' : 'AND created_by = ?';
@@ -1219,12 +1391,13 @@ app.get('/api/orders/:id/receipt', requireAuth, requireFeature('orders'), route(
   });
 }));
 
-app.post('/api/orders', requireAuth, route(async (req, res) => {
+app.post('/api/orders', requireAuth, requireActiveShift, route(async (req, res) => {
   const orderType = req.body?.order_type;
   if (!['dine_in', 'takeaway', 'delivery'].includes(orderType)) {
     throw new HttpError(400, 'Choose a valid order type.');
   }
   const orderId = await transaction(async (connection) => {
+    await lockActiveShift(req.user.id, req.shift.id, connection);
     const [openCount] = await rows(
       `SELECT COUNT(*) AS total FROM orders
         WHERE created_by = ? AND status IN ('draft', 'in_progress')`,
@@ -1240,7 +1413,7 @@ app.post('/api/orders', requireAuth, route(async (req, res) => {
     if (maxOpen !== -1 && number(openCount.total) >= maxOpen) {
       throw new HttpError(409, 'You have reached the maximum number of open orders.');
     }
-    const today = new Date().toISOString().slice(0, 10);
+    const today = req.shift.business_date;
     await rows(
       `INSERT INTO order_counters (counter_date, last_no)
        VALUES (?, 1)
@@ -1256,10 +1429,11 @@ app.post('/api/orders', requireAuth, route(async (req, res) => {
     const orderNo = `${today.replace(/-/g, '')}-${String(counter.last_no).padStart(4, '0')}`;
     const result = await rows(
       `INSERT INTO orders
-         (order_no, order_type, created_by, locked_by, created_at, updated_at, locked_at, lock_expires_at)
-       VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP(),
+         (order_no, order_type, created_by, locked_by, created_shift_id,
+          created_at, updated_at, locked_at, lock_expires_at)
+       VALUES (?, ?, ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP(),
                DATE_ADD(UTC_TIMESTAMP(), INTERVAL ${await readLockTimeout(connection)} MINUTE))`,
-      [orderNo, orderType, req.user.id, req.user.id],
+      [orderNo, orderType, req.user.id, req.user.id, req.shift.id],
       connection,
     );
     const id = number(result.insertId);
@@ -1277,9 +1451,10 @@ app.get('/api/orders/:id', requireAuth, route(async (req, res) => {
   res.json(order);
 }));
 
-app.post('/api/orders/:id/open', requireAuth, route(async (req, res) => {
+app.post('/api/orders/:id/open', requireAuth, requireActiveShift, route(async (req, res) => {
   const id = parseId(req.params.id);
   await transaction(async (connection) => {
+    await lockActiveShift(req.user.id, req.shift.id, connection);
     const [order] = await rows('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id], connection);
     if (!order) throw new HttpError(404, 'Order not found.');
     assertOrderAccess(order, req.user);
@@ -1319,7 +1494,7 @@ app.post('/api/orders/:id/release', requireAuth, route(async (req, res) => {
   res.status(204).end();
 }));
 
-app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
+app.post('/api/orders/:id/save', requireAuth, requireActiveShift, route(async (req, res) => {
   const id = parseId(req.params.id);
   const details = req.body ?? {};
   if (!['dine_in', 'takeaway', 'delivery'].includes(details.order_type)) {
@@ -1380,6 +1555,7 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
 
   let newRoundId = null;
   await transaction(async (connection) => {
+    await lockActiveShift(req.user.id, req.shift.id, connection);
     const [order] = await rows('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id], connection);
     if (!order) throw new HttpError(404, 'Order not found.');
     assertOrderAccess(order, req.user);
@@ -1538,10 +1714,11 @@ app.post('/api/orders/:id/save', requireAuth, route(async (req, res) => {
   res.json({ order, round });
 }));
 
-app.delete('/api/orders/:id/items/:itemId', requireAuth, route(async (req, res) => {
+app.delete('/api/orders/:id/items/:itemId', requireAuth, requireActiveShift, route(async (req, res) => {
   const orderId = parseId(req.params.id, 'order id');
   const itemId = parseId(req.params.itemId, 'order item id');
   await transaction(async (connection) => {
+    await lockActiveShift(req.user.id, req.shift.id, connection);
     const [order] = await rows('SELECT * FROM orders WHERE id = ? FOR UPDATE', [orderId], connection);
     if (!order) throw new HttpError(404, 'Order not found.');
     assertOrderAccess(order, req.user);
@@ -1619,7 +1796,7 @@ app.delete('/api/orders/:id/items/:itemId', requireAuth, route(async (req, res) 
   res.json(await getOrder(orderId));
 }));
 
-app.post('/api/orders/:id/checkout', requireAuth, route(async (req, res) => {
+app.post('/api/orders/:id/checkout', requireAuth, requireActiveShift, route(async (req, res) => {
   const id = parseId(req.params.id);
   const payments = req.body?.payments;
   if (!Array.isArray(payments) || payments.length === 0) throw new HttpError(400, 'Add a payment.');
@@ -1635,6 +1812,7 @@ app.post('/api/orders/:id/checkout', requireAuth, route(async (req, res) => {
   )) throw new HttpError(400, 'Enter valid payment methods and amounts.');
 
   await transaction(async (connection) => {
+    await lockActiveShift(req.user.id, req.shift.id, connection);
     const [order] = await rows('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id], connection);
     if (!order) throw new HttpError(404, 'Order not found.');
     assertOrderAccess(order, req.user);
@@ -1657,9 +1835,10 @@ app.post('/api/orders/:id/checkout', requireAuth, route(async (req, res) => {
     }
     await rows(
       `UPDATE orders SET status = 'checked_out', checked_out_by = ?, checked_out_at = UTC_TIMESTAMP(),
+             checkout_shift_id = ?,
              locked_by = NULL, locked_at = NULL, lock_expires_at = NULL
         WHERE id = ?`,
-      [req.user.id, id],
+      [req.user.id, req.shift.id, id],
       connection,
     );
     await logActivity(id, req.user.id, 'checkout', {
@@ -1672,9 +1851,21 @@ app.post('/api/orders/:id/checkout', requireAuth, route(async (req, res) => {
   res.json(await getOrder(id));
 }));
 
-app.post('/api/orders/:id/cancel', requireAuth, route(async (req, res) => {
+app.post('/api/orders/:id/cancel', requireAuth, requireActiveShift, route(async (req, res) => {
   const id = parseId(req.params.id);
+  const cancellationReason = req.user.role === 'admin'
+    ? null
+    : typeof req.body?.reason === 'string'
+      ? req.body.reason.trim()
+      : '';
+  if (req.user.role !== 'admin' && !cancellationReason) {
+    throw new HttpError(400, 'Enter a reason for cancelling this order.');
+  }
+  if (cancellationReason && cancellationReason.length > 500) {
+    throw new HttpError(400, 'Cancellation reason must be at most 500 characters.');
+  }
   await transaction(async (connection) => {
+    await lockActiveShift(req.user.id, req.shift.id, connection);
     const [order] = await rows('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id], connection);
     if (!order) throw new HttpError(404, 'Order not found.');
     assertOrderAccess(order, req.user);
@@ -1683,13 +1874,20 @@ app.post('/api/orders/:id/cancel', requireAuth, route(async (req, res) => {
       throw new HttpError(409, 'This order is open on another screen.');
     }
     await rows(
-      `UPDATE orders SET status = 'cancelled', cancelled_by = ?, cancelled_at = UTC_TIMESTAMP(),
+      `UPDATE orders SET status = 'cancelled', cancelled_by = ?, cancellation_reason = ?,
+             cancelled_at = UTC_TIMESTAMP(),
              locked_by = NULL, locked_at = NULL, lock_expires_at = NULL
         WHERE id = ?`,
-      [req.user.id, id],
+      [req.user.id, cancellationReason || null, id],
       connection,
     );
-    await logActivity(id, req.user.id, 'order_cancelled', null, connection);
+    await logActivity(
+      id,
+      req.user.id,
+      'order_cancelled',
+      cancellationReason ? { reason: cancellationReason } : null,
+      connection,
+    );
   });
   emitOrderEvent('order:updated');
   emitOrderEvent('order:unlocked');
@@ -1854,17 +2052,20 @@ app.get('/api/orders/:id/activity', requireAuth, requireAdmin, route(async (req,
 app.get('/api/reports/dashboard', requireAuth, requireAdmin, route(async (req, res) => {
   const range = req.query.range ?? 'today';
   if (!['today', '7d', '30d'].includes(range)) throw new HttpError(400, 'Invalid dashboard range.');
-  const now = Date.now();
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  const from = range === 'today' ? today.getTime() : now - (range === '7d' ? 7 : 30) * 86_400_000;
-  const previousFrom = from - (now - from);
+  await closeExpiredShifts();
+  const now = new Date();
+  const nowMilliseconds = now.getTime();
+  const today = shiftBusinessDate(now);
+  const days = range === 'today' ? 1 : range === '7d' ? 7 : 30;
+  const fromDate = shiftDateByDays(today, -(days - 1));
+  const from = shiftBusinessStart(fromDate).getTime();
+  const previousFrom = shiftBusinessStart(shiftDateByDays(fromDate, -days)).getTime();
   const sqlDate = (milliseconds) => new Date(milliseconds).toISOString().slice(0, 19).replace('T', ' ');
   const paidRows = await rows(
     `SELECT o.id, o.order_type, o.total, o.checked_out_at, u.name AS staff_name
        FROM orders o JOIN users u ON u.id = o.created_by
       WHERE o.status = 'checked_out' AND o.checked_out_at >= ? AND o.checked_out_at <= ?`,
-    [sqlDate(previousFrom), sqlDate(now)],
+    [sqlDate(previousFrom), sqlDate(nowMilliseconds)],
   );
   const currentRows = paidRows.filter((order) => new Date(dateIso(order.checked_out_at)).getTime() >= from);
   const previousRows = paidRows.filter((order) => new Date(dateIso(order.checked_out_at)).getTime() < from);
@@ -1884,7 +2085,7 @@ app.get('/api/reports/dashboard', requireAuth, requireAdmin, route(async (req, r
     type.orders += 1;
     type.sales += number(order.total);
     byType.set(order.order_type, type);
-    const hour = new Date(dateIso(order.checked_out_at)).getUTCHours();
+    const hour = zonedDateParts(new Date(dateIso(order.checked_out_at))).hour;
     const item = byHour.get(hour) ?? { hour, orders: 0, sales: 0 };
     item.orders += 1;
     item.sales += number(order.total);
@@ -1913,7 +2114,7 @@ app.get('/api/reports/dashboard', requireAuth, requireAdmin, route(async (req, r
   const [cancelledResult] = await rows(
     `SELECT COUNT(*) AS total FROM orders
       WHERE status = 'cancelled' AND cancelled_at >= ? AND cancelled_at <= ?`,
-    [sqlDate(from), sqlDate(now)],
+    [sqlDate(from), sqlDate(nowMilliseconds)],
   );
   res.json({
     totals: totalsOf(currentRows),
@@ -1975,6 +2176,13 @@ async function start() {
   await rows('SELECT id FROM user_sessions LIMIT 0');
   await rows('SELECT id FROM inventory_purchases LIMIT 0');
   await rows('SELECT menu_item_id FROM production_plan LIMIT 0');
+  await rows('SELECT id FROM mst_shifts LIMIT 0');
+  await rows('SELECT created_shift_id, checkout_shift_id FROM orders LIMIT 0');
+  await closeExpiredShifts();
+  shiftSweepTimer = setInterval(() => {
+    closeExpiredShifts().catch((error) => console.error('Could not auto-end expired shifts:', error.message));
+  }, 60_000);
+  shiftSweepTimer.unref();
   server.listen(API_PORT, API_HOST, () => {
     console.log(`HAWT POS API listening on http://${API_HOST}:${API_PORT} (MySQL ${process.env.DB_NAME})`);
   });
@@ -1991,6 +2199,7 @@ function shutdown(signal) {
   if (shutdownStarted) return;
   shutdownStarted = true;
   console.log(`Received ${signal}; shutting down HAWT POS API.`);
+  if (shiftSweepTimer) clearInterval(shiftSweepTimer);
 
   const timeout = setTimeout(() => {
     console.error('API shutdown timed out.');

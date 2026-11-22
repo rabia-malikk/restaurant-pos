@@ -17,6 +17,18 @@ export interface User {
   features: UserFeature[];
 }
 
+export interface ActiveShift {
+  id: number;
+  business_date: string;
+  started_at: string;
+}
+
+export interface ShiftStatus {
+  business_date: string;
+  timezone: string;
+  active_shift: ActiveShift | null;
+}
+
 export interface UserCapacity {
   active_users: number;
   max_users: number;
@@ -166,6 +178,7 @@ export interface Order extends OrderDetails {
   created_at: string;
   updated_at: string;
   checked_out_at: string | null;
+  cancellation_reason: string | null;
 }
 
 export interface ReceiptPayment {
